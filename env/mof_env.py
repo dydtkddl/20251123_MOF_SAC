@@ -2,9 +2,6 @@ import numpy as np
 from ase.neighborlist import neighbor_list
 from ase.data import covalent_radii
 from ase.geometry import get_distances
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
 from ase.geometry import find_mic
 
 
@@ -26,9 +23,7 @@ class MOFEnv:
     ):
         self.atoms_loader = atoms_loader
 
-        # number of neighbors (slots)
         self.k = k_neighbors
-
         self.cmax = cmax
         self.max_steps = max_steps
         self.fmax_threshold = fmax_threshold
@@ -45,7 +40,6 @@ class MOFEnv:
         self.feature_dim = None
 
         self.reset()
-
 
     # ============================================================
     # TRUE BOND DETECTION
@@ -68,27 +62,107 @@ class MOFEnv:
 
         return np.array(bond_pairs, dtype=int), np.array(bond_d0, dtype=float)
 
-
     # ============================================================
-    # AROMATIC (6-cycle) DETECTION
+    # AROMATIC (6-cycle) DETECTION (IMPROVED)
     # ============================================================
-    def _detect_aromatic_nodes(self, adj):
-        N = self.N
+    def _detect_aromatic_nodes(self, adj, Z):
+        N = len(Z)
         aromatic = set()
+        visited_cycles = set()
 
-        for start in range(N):
-            queue = [(start, [start])]
-            while queue:
-                node, path = queue.pop()
-                if len(path) > 6:
-                    continue
-                for nxt in adj[node]:
-                    if nxt == start and len(path) == 6:
-                        aromatic |= set(path)
-                    elif nxt not in path:
-                        queue.append((nxt, path + [nxt]))
+        def canonical_cycle(cycle):
+            L = len(cycle)
+            seqs = []
+            for r in range(L):
+                seqs.append(tuple(cycle[r:] + cycle[:r]))
+            rev = list(reversed(cycle))
+            for r in range(L):
+                seqs.append(tuple(rev[r:] + rev[:r]))
+            return min(seqs)
+
+        def dfs(start, current, depth):
+            if depth > 6:
+                return
+            last = current[-1]
+            for nxt in adj[last]:
+                if nxt == start and depth == 6:
+                    cyc = canonical_cycle(current.copy())
+                    if cyc not in visited_cycles:
+                        # carbon-only, degree constraint
+                        if all(Z[x] == 6 and len(adj[x]) <= 3 for x in cyc):
+                            aromatic.update(cyc)
+                        visited_cycles.add(cyc)
+                elif nxt > start and nxt not in current:
+                    dfs(start, current + [nxt], depth + 1)
+
+        for s in range(N):
+            if Z[s] == 6 and len(adj[s]) <= 3:
+                dfs(s, [s], 1)
+
         return aromatic
 
+    # ============================================================
+    # METAL FLAG (IMPROVED)
+    # ============================================================
+    def _assign_metal_flags(self, Z):
+        # Typical MOF metals
+        MOF_METALS = {
+            12, 13, 20,        # Mg, Al, Ca
+            22,23,24,25,26,27,28,29,  # Ti → Cu
+            30,                # Zn
+            40,                # Zr
+            72                 # Hf
+        }
+        return np.array([1.0 if z in MOF_METALS else 0.0 for z in Z], dtype=np.float32)
+
+    # ============================================================
+    # CARBOXYLATE O DETECTION (IMPROVED)
+    # ============================================================
+    def _detect_carboxylate_O(self, Z, adj, is_metal):
+        N = len(Z)
+        is_carboxylate_O = np.zeros(N, dtype=np.float32)
+
+        for O in range(N):
+            if Z[O] != 8:
+                continue
+
+            for C in adj[O]:
+                if Z[C] != 6:
+                    continue
+
+                # C must have two O neighbors
+                O_list = [x for x in adj[C] if Z[x] == 8]
+                if len(O_list) != 2:
+                    continue
+
+                # C must bind at least one metal
+                metal_neighbors = sum(is_metal[n] for n in adj[C])
+                if metal_neighbors >= 1:
+                    is_carboxylate_O[O] = 1.0
+                    break
+
+        return is_carboxylate_O
+
+    # ============================================================
+    # μ2-O / μ3-O DETECTION (IMPROVED)
+    # ============================================================
+    def _detect_mu_oxygens(self, Z, adj, is_metal):
+        N = len(Z)
+        is_mu2O = np.zeros(N, dtype=np.float32)
+        is_mu3O = np.zeros(N, dtype=np.float32)
+
+        for O in range(N):
+            if Z[O] != 8:
+                continue
+
+            metal_count = sum(is_metal[n] for n in adj[O])
+
+            if metal_count == 2:
+                is_mu2O[O] = 1.0
+            elif metal_count >= 3:
+                is_mu3O[O] = 1.0
+
+        return is_mu2O, is_mu3O
 
     # ============================================================
     # RESET
@@ -104,9 +178,10 @@ class MOFEnv:
         self.prev_disp = np.zeros_like(self.forces)
 
         # Radius
-        self.covalent_radii = np.array([covalent_radii[a.number] for a in self.atoms])
+        Z = np.array([a.number for a in self.atoms])
+        self.covalent_radii = np.array([covalent_radii[z] for z in Z])
 
-        # Bonds
+        # True bonds
         self.bond_pairs, self.bond_d0 = self._detect_true_bonds(self.atoms)
         print(f"[INIT] Detected true bonds = {len(self.bond_pairs)}")
 
@@ -116,84 +191,76 @@ class MOFEnv:
             self.adj[a].append(b)
             self.adj[b].append(a)
 
-        Z = np.array([a.number for a in self.atoms])
-
-        # ---------- Aromatic
-        aromatic_nodes = self._detect_aromatic_nodes(self.adj)
+        # Aromatic detection
+        aromatic_nodes = self._detect_aromatic_nodes(self.adj, Z)
         self.is_aromatic = np.zeros(self.N, dtype=np.float32)
         self.is_aromatic[list(aromatic_nodes)] = 1.0
 
-        # ---------- Atomic roles
-        self.is_metal = (Z > 20).astype(np.float32)
-        self.is_carboxylate_O = np.zeros(self.N, dtype=np.float32)
-        self.is_mu2O = np.zeros(self.N, dtype=np.float32)
-        self.is_mu3O = np.zeros(self.N, dtype=np.float32)
-        self.is_linker = np.zeros(self.N, dtype=np.float32)
-        self.is_aromatic_C = np.zeros(self.N, dtype=np.float32)
-
-        # Carboxylate O
-        for i in range(self.N):
-            if Z[i] == 8:
-                for c in self.adj[i]:
-                    if Z[c] == 6:
-                        O2 = [x for x in self.adj[c] if Z[x] == 8 and x != i]
-                        if len(O2) > 0:
-                            self.is_carboxylate_O[i] = 1.0
-
-        # μ2-O, μ3-O
-        for i in range(self.N):
-            if Z[i] == 8:
-                metal_neighbors = sum(self.is_metal[j] for j in self.adj[i])
-                if metal_neighbors == 2:
-                    self.is_mu2O[i] = 1.0
-                if metal_neighbors >= 3:
-                    self.is_mu3O[i] = 1.0
+        # Role flags
+        self.is_metal = self._assign_metal_flags(Z)
+        self.is_carboxylate_O = self._detect_carboxylate_O(Z, self.adj, self.is_metal)
+        self.is_mu2O, self.is_mu3O = self._detect_mu_oxygens(Z, self.adj, self.is_metal)
 
         # Aromatic carbon
+        self.is_aromatic_C = np.zeros(self.N, dtype=np.float32)
         for i in range(self.N):
             if Z[i] == 6 and self.is_aromatic[i] == 1.0:
                 self.is_aromatic_C[i] = 1.0
 
         # Linker atoms
+        self.is_linker = np.zeros(self.N, dtype=np.float32)
         for i in range(self.N):
-            if (not self.is_metal[i]) and (not self.is_carboxylate_O[i]) and (not self.is_aromatic_C[i]):
+            if (
+                not self.is_metal[i]
+                and not self.is_carboxylate_O[i]
+                and not self.is_aromatic_C[i]
+            ):
                 if Z[i] in [6, 7]:
                     self.is_linker[i] = 1.0
 
-        # Bond-type counts
+        # ============================================================
+        # BOND-TYPE COUNTS (IMPROVED)
+        # ============================================================
         self.bond_types = np.zeros((self.N, 6), dtype=np.float32)
+
         for a, b in self.bond_pairs:
 
+            # Metal–O
             if self.is_metal[a] and Z[b] == 8:
                 self.bond_types[a][0] += 1
+            if self.is_metal[b] and Z[a] == 8:
                 self.bond_types[b][0] += 1
 
+            # Metal–N
             if self.is_metal[a] and Z[b] == 7:
                 self.bond_types[a][1] += 1
+            if self.is_metal[b] and Z[a] == 7:
                 self.bond_types[b][1] += 1
 
-            if self.is_carboxylate_O[a] or self.is_carboxylate_O[b]:
-                self.bond_types[a][2] += 1
+            # Carboxylate O
+            if self.is_carboxylate_O[a]:
                 self.bond_types[b][2] += 1
+            if self.is_carboxylate_O[b]:
+                self.bond_types[a][2] += 1
 
-            if (
-                self.is_aromatic[a]
-                and self.is_aromatic[b]
-                and Z[a] == 6
-                and Z[b] == 6
-            ):
+            # Aromatic C–C
+            if self.is_aromatic_C[a] and self.is_aromatic_C[b]:
                 self.bond_types[a][3] += 1
                 self.bond_types[b][3] += 1
 
-            if self.is_mu2O[a] or self.is_mu2O[b]:
-                self.bond_types[a][4] += 1
+            # μ2-O
+            if self.is_mu2O[a]:
                 self.bond_types[b][4] += 1
+            if self.is_mu2O[b]:
+                self.bond_types[a][4] += 1
 
-            if self.is_mu3O[a] or self.is_mu3O[b]:
-                self.bond_types[a][5] += 1
+            # μ3-O
+            if self.is_mu3O[a]:
                 self.bond_types[b][5] += 1
+            if self.is_mu3O[b]:
+                self.bond_types[a][5] += 1
 
-        # Feature dim
+        # Feature dimension
         self.feature_dim = len(self._make_feature(0))
 
         self.E_prev = self.atoms.get_potential_energy()
@@ -201,26 +268,18 @@ class MOFEnv:
 
         return self._obs()
 
-
     # ============================================================
-    # Relative vector (FIXED: PBC-aware)
-
-    # def _rel_vec(self, i, j):
-    #     # raw displacement
-    #     disp = self.atoms.positions[j] - self.atoms.positions[i]
-    #     # apply minimum-image convention (PBC safe)
-    #     rij, _ = find_mic(disp[None], cell=self.atoms.cell)
-    #     return rij[0]
+    # Relative vector (PBC-aware MIC)
+    # ============================================================
     def _rel_vec(self, i, j):
         disp = self.atoms.positions[j] - self.atoms.positions[i]
         cell = self.atoms.cell.array
-        frac = np.linalg.solve(cell.T, disp)    # fractional coords
-        frac -= np.round(frac)                  # minimum image
+        frac = np.linalg.solve(cell.T, disp)
+        frac -= np.round(frac)
         return frac @ cell
 
-
     # ============================================================
-    # Hop sets (1, 2, 3-hop)
+    # Hop sets
     # ============================================================
     def _get_hop_sets(self, idx, max_hop=3):
         visited = set([idx])
@@ -240,7 +299,6 @@ class MOFEnv:
             frontier = next_frontier
 
         return hop_map
-
 
     # ============================================================
     # MAKE FEATURE
@@ -271,9 +329,8 @@ class MOFEnv:
 
         return np.concatenate([core, roles, self.bond_types[idx]])
 
-
     # ============================================================
-    # OBS (Hop-priority neighbor selection)
+    # OBSERVATION
     # ============================================================
     def _obs(self):
 
@@ -282,28 +339,21 @@ class MOFEnv:
         for i in range(self.N):
 
             fi = self._make_feature(i)
-
             hop_sets = self._get_hop_sets(i, max_hop=3)
 
             selected = []
 
-            # ----------------------------
-            # 1-hop neighbors (highest priority)
-            # ----------------------------
+            # 1-hop
             for j in hop_sets[1]:
                 if len(selected) < self.k:
                     selected.append(j)
 
-            # ----------------------------
-            # 2-hop neighbors (second priority)
-            # ----------------------------
+            # 2-hop
             for j in hop_sets[2]:
                 if len(selected) < self.k:
                     selected.append(j)
 
-            # ----------------------------
-            # 3-hop neighbors (random fill)
-            # ----------------------------
+            # 3-hop
             remain = self.k - len(selected)
             if remain > 0 and len(hop_sets[3]) > 0:
                 candidates = hop_sets[3]
@@ -312,11 +362,10 @@ class MOFEnv:
                 else:
                     selected += list(np.random.choice(candidates, remain, replace=False))
 
-            # Padding for missing neighbors
+            # Padding
             while len(selected) < self.k:
                 selected.append(None)
 
-            # Collect neighbor feats and rel vectors
             nbr_feats = []
             dists = []
             vecs = []
@@ -342,7 +391,6 @@ class MOFEnv:
 
         return np.array(obs_list, dtype=np.float32)
 
-
     # ============================================================
     # STEP
     # ============================================================
@@ -362,14 +410,14 @@ class MOFEnv:
         old_norm = np.maximum(np.linalg.norm(self.forces, axis=1), 1e-12)
         new_norm = np.maximum(np.linalg.norm(new_forces, axis=1), 1e-12)
 
-        # rewards
+        # Rewards
         r_f = np.log(old_norm) - np.log(new_norm)
         E_new = self.atoms.get_potential_energy()
         r_e = (self.E_prev - E_new)
         reward = self.w_f * r_f + self.w_e * r_e
         self.E_prev = E_new
 
-        # soft bond penalties
+        # Soft bond penalties
         cell = self.atoms.cell
         pbc = self.atoms.pbc
 
@@ -396,7 +444,7 @@ class MOFEnv:
         if self.step_count >= self.max_steps:
             done = True
 
-        # update history
+        # Update history
         self.prev_disp = disp.copy()
         self.prev_forces = self.forces.copy()
         self.forces = new_forces.copy()
