@@ -1,6 +1,6 @@
 ##############################
 # train_mof_multi_env.py  
-# Multi-ENV + Short Episode + Low Perturb + Full Logging + XYZ trajectory dump
+# Multi-ENV + Curriculum Horizon + Full Logging + XYZ trajectory dump
 ##############################
 
 import os
@@ -56,7 +56,7 @@ def save_checkpoint(ep, agent, tag="auto"):
 
 
 ############################################################
-# pool DIR
+# CIF SAMPLING
 ############################################################
 POOL_DIR = "mofs/train_pool_valid"
 
@@ -67,16 +67,6 @@ def sample_cif():
         if f.endswith(".cif")
     ]
     return np.random.choice(cifs)
-
-
-############################################################
-# LOW PERTURB
-############################################################
-def perturb(a, sigma=0.01):
-    p = a.get_positions()
-    p += np.random.normal(0, sigma, p.shape)
-    a.set_positions(p)
-    return a
 
 
 ############################################################
@@ -93,16 +83,17 @@ calc = MACECalculator(
 ############################################################
 # CONFIG
 ############################################################
-EPOCHS      = 200
-MAX_STEPS   = 300
-SWITCH_N    = 300
-FMAX_THRESH = 0.05
+EPOCHS       = 800           # 총 에피소드
+BASE_STEPS   = 300           # 초기 max_steps
+FINAL_STEPS  = 1000          # 최종 max_steps
+HORIZON_SCH  = 500           # 500 episode 동안 300 → 1000으로 증가
 
-BUFFER_SIZE = 3_000_000
-BATCH_SIZE  = 256
+FMAX_THRESH  = 0.05
+BUFFER_SIZE  = 3_000_000
+BATCH_SIZE   = 256
 
-OBS_DIM     = 204
-ACT_DIM     = 3
+OBS_DIM      = 204
+ACT_DIM      = 3
 CHECKPOINT_INTERVAL = 5
 
 
@@ -124,9 +115,9 @@ agent = SACAgent(
 
 
 ############################################################
-# TRAIN LOOP (MULTI-ENV)
+# TRAIN LOOP
 ############################################################
-logger.info(f"[MACS-MOF][Multi-ENV] Start training EPOCHS={EPOCHS}, STEPS={MAX_STEPS}, SWITCH_N={SWITCH_N}")
+logger.info(f"[MACS-MOF] Training start EPOCHS={EPOCHS}, BASE_STEPS={BASE_STEPS}, FINAL_STEPS={FINAL_STEPS}")
 
 global_start = time.time()
 
@@ -135,6 +126,15 @@ for ep in range(EPOCHS):
 
     logger.info("\n" + "="*80)
     logger.info(f"[EP {ep}] START")
+
+    # ------------------------------------------------------
+    # 🔥 Horizon Curriculum 적용
+    # ------------------------------------------------------
+    ratio = min(ep / HORIZON_SCH, 1.0)
+    max_steps = int(BASE_STEPS + (FINAL_STEPS - BASE_STEPS) * ratio)
+    max_steps = min(max_steps, FINAL_STEPS)
+
+    logger.info(f"[EP {ep}] max_steps set to {max_steps}")
 
     obs = None
     env = None
@@ -149,41 +149,39 @@ for ep in range(EPOCHS):
     traj_path = os.path.join(snap_dir, "traj.xyz")
     energy_path = os.path.join(snap_dir, "energies.txt")
 
-    if os.path.exists(traj_path):
-        os.remove(traj_path)
+    if os.path.exists(traj_path): os.remove(traj_path)
+    if os.path.exists(energy_path): os.remove(energy_path)
 
-    if os.path.exists(energy_path):
-        os.remove(energy_path)
 
-    # ------------------------------------------------------
-    # MULTI-ENV LOOP
-    # ------------------------------------------------------
-    for step in tqdm(range(MAX_STEPS), desc=f"[EP {ep}]", ncols=120):
+    # ------------------------------
+    # 🔥 STRUCTURE INIT (per episode)
+    # ------------------------------
+    cif = sample_cif()
+    atoms = read(cif)
+    atoms.calc = calc
 
-        # 🔥 STRUCTURE SWITCH
-        if (step % SWITCH_N == 0) or (obs is None):
-            cif = sample_cif()
-            atoms = read(cif)
-            # atoms = perturb(atoms)
-            atoms.calc = calc
+    env = MOFEnv(
+        atoms_loader=lambda: atoms,
+        k_neighbors=12,
+        fmax_threshold=FMAX_THRESH,
+        max_steps=max_steps,
+        cmax=0.03,
+    )
 
-            env = MOFEnv(
-                atoms_loader=lambda: atoms,
-                k_neighbors=12,
-                fmax_threshold=FMAX_THRESH,
-                max_steps=MAX_STEPS,
-                cmax=0.03
-            )
+    obs = env.reset()
+    logger.info(f"[EP {ep}] CIF loaded: {cif}")
 
-            obs = env.reset()
 
-            logger.info(f"[EP {ep}] [SWITCH] step={step} new CIF={cif}")
+    ##################################################
+    # EPISODE LOOP
+    ##################################################
+    for step in tqdm(range(max_steps), desc=f"[EP {ep}]", ncols=120):
 
-        # ---- RL INTERACTION ----
+        # ---- RL action ----
         act = agent.act(obs)
         next_obs, rew, done = env.step(act)
 
-        # Store transitions
+        # store all atoms transitions
         for i in range(env.N):
             replay.store(obs[i], act[i], rew[i], next_obs[i], done)
 
@@ -194,7 +192,7 @@ for ep in range(EPOCHS):
         ep_ret += float(np.mean(rew))
 
         # ------------------------------------------------------
-        # 🔥 SAVE XYZ FRAME (append)
+        # 🔥 SAVE XYZ FRAME
         # ------------------------------------------------------
         env.atoms.write(traj_path, append=True)
 
@@ -207,13 +205,10 @@ for ep in range(EPOCHS):
         with open(energy_path, "a") as f:
             f.write(f"{step} {E_total:.8f} {E_pa:.8f}\n")
 
-        # Force stats
+        # force stats
         f = np.linalg.norm(env.forces, axis=1)
-        f_avg = float(np.mean(f))
-        f_max = float(np.max(f))
-        f_min = float(np.min(f))
+        f_avg, f_max, f_min = float(np.mean(f)), float(np.max(f)), float(np.min(f))
 
-        # Per-step log
         logger.info(
             f"[EP {ep}][STEP {step}] "
             f"Natom={env.N} | "
@@ -224,9 +219,13 @@ for ep in range(EPOCHS):
         )
 
         if done:
+            logger.info(f"[EP {ep}] terminated at step={step}")
             break
 
 
+    ##################################################
+    # EPISODE END
+    ##################################################
     logger.info(f"[EP {ep}] return={ep_ret:.6f}")
     logger.info(f"[EP {ep}] replay={len(replay):,}")
 
@@ -234,9 +233,9 @@ for ep in range(EPOCHS):
         save_checkpoint(ep, agent, tag="interval")
 
 
-# ----------------------------
-# final checkpoint
-# ----------------------------
+# ===================================
+# FINAL CHECKPOINT
+# ===================================
 save_checkpoint(EPOCHS, agent, tag="final")
 
 logger.info("[TRAIN DONE]")
