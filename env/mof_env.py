@@ -15,7 +15,7 @@ class MOFEnv:
         max_steps=300,
         fmax_threshold=0.05,
         bond_break_ratio=1.8,
-        k_bond=3.0,              # 안정형 값 (기존 50 → 3)
+        k_bond=3.0,              # 안정값 (기존 50 → 3)
         max_penalty=50.0,        # soft cap
         debug_bond=False
     ):
@@ -26,13 +26,14 @@ class MOFEnv:
         self.max_steps = max_steps
         self.fmax_threshold = fmax_threshold
 
-        # Soft bond penalty (안정 버전)
+        # Soft bond penalty
         self.bond_break_ratio = bond_break_ratio
         self.k_bond = k_bond
         self.max_penalty = max_penalty
         self.debug_bond = debug_bond
 
         self.feature_dim = None
+
         self.reset()
 
     # ============================================================
@@ -57,14 +58,14 @@ class MOFEnv:
         return np.array(bond_pairs, dtype=int), np.array(bond_d0, dtype=float)
 
     # ============================================================
-    # AROMATIC (6-cycle) DETECTION
+    # AROMATIC (6-cycle)
     # ============================================================
     def _detect_aromatic_nodes(self, adj, Z):
         N = len(Z)
         aromatic = set()
-        visited_cycles = set()
+        visited = set()
 
-        def canonical_cycle(cycle):
+        def canonical(cycle):
             L = len(cycle)
             seqs = []
             for r in range(L):
@@ -74,19 +75,20 @@ class MOFEnv:
                 seqs.append(tuple(rev[r:] + rev[:r]))
             return min(seqs)
 
-        def dfs(start, current, depth):
+        def dfs(s, path, depth):
             if depth > 6:
                 return
-            last = current[-1]
+            last = path[-1]
+
             for nxt in adj[last]:
-                if nxt == start and depth == 6:
-                    cyc = canonical_cycle(current.copy())
-                    if cyc not in visited_cycles:
+                if nxt == s and depth == 6:
+                    cyc = canonical(path.copy())
+                    if cyc not in visited:
                         if all(Z[x] == 6 and len(adj[x]) <= 3 for x in cyc):
                             aromatic.update(cyc)
-                        visited_cycles.add(cyc)
-                elif nxt > start and nxt not in current:
-                    dfs(start, current + [nxt], depth + 1)
+                        visited.add(cyc)
+                elif nxt > s and nxt not in path:
+                    dfs(s, path + [nxt], depth + 1)
 
         for s in range(N):
             if Z[s] == 6 and len(adj[s]) <= 3:
@@ -202,36 +204,31 @@ class MOFEnv:
         self.bond_types = np.zeros((self.N, 6), dtype=np.float32)
 
         for a, b in self.bond_pairs:
-            # metal-O
+
             if self.is_metal[a] and Z[b] == 8:
                 self.bond_types[a][0] += 1
             if self.is_metal[b] and Z[a] == 8:
                 self.bond_types[b][0] += 1
 
-            # metal-N
             if self.is_metal[a] and Z[b] == 7:
                 self.bond_types[a][1] += 1
             if self.is_metal[b] and Z[a] == 7:
                 self.bond_types[b][1] += 1
 
-            # carboxylate O
             if self.is_carboxylate_O[a]:
                 self.bond_types[b][2] += 1
             if self.is_carboxylate_O[b]:
                 self.bond_types[a][2] += 1
 
-            # aromatic
             if self.is_aromatic_C[a] and self.is_aromatic_C[b]:
                 self.bond_types[a][3] += 1
                 self.bond_types[b][3] += 1
 
-            # μ2-O
             if self.is_mu2O[a]:
                 self.bond_types[b][4] += 1
             if self.is_mu2O[b]:
                 self.bond_types[a][4] += 1
 
-            # μ3-O
             if self.is_mu3O[a]:
                 self.bond_types[b][5] += 1
             if self.is_mu3O[b]:
@@ -240,10 +237,13 @@ class MOFEnv:
         self.feature_dim = len(self._make_feature(0))
         self.step_count = 0
 
+        # COM (translation drift 방지용)
+        self.COM_prev = self.atoms.positions.mean(axis=0)
+
         return self._obs()
 
     # ============================================================
-    # MIC displacement (PBC-safe)
+    # MIC relative displacement
     # ============================================================
     def _rel_vec(self, i, j):
         disp = self.atoms.positions[j] - self.atoms.positions[i]
@@ -256,7 +256,6 @@ class MOFEnv:
     def _get_hop_sets(self, idx, max_hop=3):
         visited = set([idx])
         frontier = [idx]
-
         hop_map = {1: [], 2: [], 3: []}
 
         for hop in range(1, max_hop + 1):
@@ -278,8 +277,7 @@ class MOFEnv:
         gi = self.forces[idx]
         gprev = self.prev_forces[idx]
 
-        gnorm = np.linalg.norm(gi)
-        gnorm = max(gnorm, 1e-12)
+        gnorm = max(np.linalg.norm(gi), 1e-12)
 
         core = np.concatenate([
             np.array([ri, min(gnorm, self.cmax), np.log(gnorm + 1e-6)]),
@@ -321,11 +319,11 @@ class MOFEnv:
 
             remain = self.k - len(selected)
             if remain > 0 and len(hop_sets[3]) > 0:
-                candidates = hop_sets[3]
-                if len(candidates) <= remain:
-                    selected += candidates
+                cand = hop_sets[3]
+                if len(cand) <= remain:
+                    selected += cand
                 else:
-                    selected += list(np.random.choice(candidates, remain, replace=False))
+                    selected += list(np.random.choice(cand, remain, replace=False))
 
             while len(selected) < self.k:
                 selected.append(None)
@@ -342,7 +340,6 @@ class MOFEnv:
                 else:
                     fj = self._make_feature(j)
                     rel = self._rel_vec(i, j)
-
                     nbr_feats.append(fj)
                     dists.append(np.linalg.norm(rel))
                     vecs.append(rel)
@@ -360,32 +357,39 @@ class MOFEnv:
 
         self.step_count += 1
 
-        # action clipping (안정성 강화)
+        # action clipping
         action = np.clip(action, -1.0, 1.0)
 
-        gnorm = np.linalg.norm(self.forces, axis=1)
-        gnorm = np.where(gnorm > 1e-12, gnorm, 1e-12)
-
+        gnorm = np.maximum(np.linalg.norm(self.forces, axis=1), 1e-12)
         c = np.minimum(gnorm, self.cmax).reshape(-1, 1)
-        disp = c * action
 
-        # displacement clipping (과한 탐색 방지)
+        disp = c * action
         disp = np.clip(disp, -0.5, 0.5)
 
         self.atoms.positions += disp
-
         new_forces = self.atoms.get_forces()
 
         old_norm = np.maximum(np.linalg.norm(self.forces, axis=1), 1e-12)
         new_norm = np.maximum(np.linalg.norm(new_forces, axis=1), 1e-12)
 
-        # Force-only reward (안정형)
+        # ----------------------
+        # Force reward
+        # ----------------------
         r_f = np.log(old_norm + 1e-6) - np.log(new_norm + 1e-6)
         reward = r_f
 
-        # =========================================
-        # Soft bond penalty (안정형 버전)
-        # =========================================
+        # ============================================================
+        # COM drift penalty (translation suppressor)
+        # ============================================================
+        COM_new = self.atoms.positions.mean(axis=0)
+        delta_COM = np.linalg.norm(COM_new - self.COM_prev)
+
+        reward -= 200.0 * delta_COM   # 강한 억제
+        self.COM_prev = COM_new.copy()
+
+        # ============================================================
+        # Soft bond penalty
+        # ============================================================
         for idx, (a, b) in enumerate(self.bond_pairs):
 
             rel = self._rel_vec(a, b)
@@ -396,13 +400,11 @@ class MOFEnv:
             stretch = max(0.0, ratio - self.bond_break_ratio)
             compress = max(0.0, 0.6 - ratio)
 
-            # sqrt 기반 + cap 추가 (안정성 극대화)
             penalty = self.k_bond * np.sqrt(stretch**2 + compress**2)
             penalty = min(penalty, self.max_penalty)
 
             reward -= penalty
 
-            # 극단적 bond break는 조기종료
             if ratio > 4.0 or ratio < 0.3:
                 return self._obs(), reward - 100.0, True
 
