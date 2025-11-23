@@ -1,5 +1,5 @@
 ##############################
-# train_mof.py  (ULTRA LOG + ROTATING LOG)
+# train_mof.py  (ULTRA LOG + ROTATING LOG + CHECKPOINT)
 ##############################
 
 import os
@@ -8,6 +8,7 @@ import numpy as np
 import logging
 from logging.handlers import RotatingFileHandler
 from tqdm import tqdm
+import torch
 
 from ase.io import read
 from mace.calculators import MACECalculator
@@ -18,7 +19,7 @@ from utils.replay_buffer import ReplayBuffer
 
 
 ############################################################
-# ROTATING LOGGING (10 MB each, keep 10 files)
+# ROTATING LOGGING
 ############################################################
 log_handler = RotatingFileHandler(
     "train.log",
@@ -28,10 +29,31 @@ log_handler = RotatingFileHandler(
 log_handler.setFormatter(logging.Formatter(
     "%(asctime)s - %(levelname)s - %(message)s"
 ))
-
 logger = logging.getLogger("train")
 logger.setLevel(logging.INFO)
 logger.addHandler(log_handler)
+
+
+############################################################
+# CHECKPOINT SAVE FUNCTION
+############################################################
+def save_checkpoint(ep, agent, tag="auto"):
+    os.makedirs("checkpoints", exist_ok=True)
+
+    ckpt = {
+        "epoch": ep,
+        "actor": agent.actor.state_dict(),
+        "q1": agent.q1.state_dict(),
+        "q2": agent.q2.state_dict(),
+        "v": agent.v.state_dict(),
+        "v_tgt": agent.v_tgt.state_dict(),
+        "log_alpha": float(agent.log_alpha.detach().cpu()),
+    }
+
+    path = f"checkpoints/ckpt_ep{ep:04d}_{tag}.pt"
+    torch.save(ckpt, path)
+
+    logger.info(f"[CHECKPOINT SAVED] => {path}")
 
 
 ############################################################
@@ -82,6 +104,8 @@ BATCH_SIZE  = 256
 
 OBS_DIM     = 204
 ACT_DIM     = 3
+
+SAVE_INTERVAL = 5   # save every 5 epochs
 
 
 ############################################################
@@ -141,7 +165,6 @@ for ep in range(EPOCHS):
         act = agent.act(obs)
         next_obs, rew, done = env.step(act)
 
-        # buffer push
         for i in range(env.N):
             replay.store(obs[i], act[i], rew[i], next_obs[i], done)
 
@@ -152,38 +175,26 @@ for ep in range(EPOCHS):
         ep_ret += np.mean(rew)
 
         force = np.linalg.norm(env.forces,axis=1)
-        f_avg = float(np.mean(force))
-        f_max = float(np.max(force))
-        f_min = float(np.min(force))
 
-        step_times.append( (time.time()-step_t0)*1000 )
-
-
-        #######################################################
-        # PER-STEP LOG
-        #######################################################
-        logger.info(
-            f"[EP {ep}][STEP {step}] "
-            f"Natom={env.N} | "
-            f"Favg={f_avg:.6f} Fmax={f_max:.6f} Fmin={f_min:.6f} | "
-            f"rew_mean={np.mean(rew):.6f} | "
-            f"replay={len(replay):,} | "
-            f"alpha={float(agent.alpha):.6f}"
-        )
+        step_times.append((time.time()-step_t0)*1000)
 
         if done:
             break
 
 
-
-    ep_dur = time.time() - global_start
-    mean_step = np.mean(step_times)
-
     logger.info(f"[EP {ep}] return={ep_ret:.6f}")
-    logger.info(f"[EP {ep}] mean step time={mean_step:.2f} ms")
-    logger.info(f"[EP {ep}] total replay={len(replay):,}")
-    logger.info(f"[EP {ep}] episode duration={ep_dur/60:.2f} min")
+    logger.info(f"[EP {ep}] replay={len(replay):,}")
 
+    # periodic checkpoint
+    if ep % SAVE_INTERVAL == 0 and ep > 0:
+        save_checkpoint(ep, agent, tag="interval")
+
+
+
+############################################################
+# FINAL SAVE
+############################################################
+save_checkpoint(EPOCHS, agent, tag="final")
 
 
 logger.info("[TRAIN DONE]")
