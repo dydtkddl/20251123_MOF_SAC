@@ -7,21 +7,6 @@ from ase.neighborlist import neighbor_list
 from ase.data import covalent_radii
 
 class MOFEnv:
-    """
-    MACS-MOF reinforcement environment
-    Following MACS methodology:
-
-    Observation per-atom:
-        oᵢᵗ = concat(
-            fᵢᵗ,
-            f(nei1), ... f(nei_k),
-            |r1| ... |rk|,
-            r1 ... rk
-        )
-
-    Reward:
-        R = log(|gᵢᵗ|) - log(|gᵢᵗ⁺¹|)
-    """
 
     def __init__(
         self,
@@ -40,9 +25,6 @@ class MOFEnv:
         self.reset()
 
 
-    ############################################################
-    # reset
-    ############################################################
     def reset(self):
 
         self.atoms = self.atoms_loader()
@@ -57,12 +39,10 @@ class MOFEnv:
         ])
         self.step_count = 0
 
-        return self._obs()
+        # ✨ 중요 추가
+        return self._obs().astype(np.float32)
 
 
-    ############################################################
-    # compute neighbors
-    ############################################################
     def _compute_neighbors(self):
 
         i, j, offsets = neighbor_list(
@@ -87,9 +67,6 @@ class MOFEnv:
         return nei_dict
 
 
-    ############################################################
-    # feature fᵢᵗ
-    ############################################################
     def _make_feature(self, idx):
 
         ri = self.covalent_radii[idx]
@@ -118,9 +95,6 @@ class MOFEnv:
         return fi
 
 
-    ############################################################
-    # obs
-    ############################################################
     def _obs(self):
 
         neighbors = self._compute_neighbors()
@@ -138,6 +112,7 @@ class MOFEnv:
 
             for _ in range(self.k - len(neighbors[i])):
                 block.append(np.zeros_like(fi))
+
 
             dists = []
             vecs = []
@@ -165,28 +140,21 @@ class MOFEnv:
 
 
     ############################################################
-    # step
-    ############################################################
-    ############################################################
     def step(self, action):
 
         self.step_count += 1
 
-        # ---- scaling factor cᵢᵗ ----
         gnorm = np.linalg.norm(self.forces, axis=1)
         gnorm = np.where(gnorm > 1e-12, gnorm, 1e-12)
 
         c = np.minimum(gnorm, self.cmax).reshape(-1,1)
 
-        # ---- scaled displacement ----
         disp = c * action
 
         self.atoms.positions += disp
 
-        # ---- compute new forces ----
         new_forces = self.atoms.get_forces()
 
-        # ---- reward ----
         old_norm = np.linalg.norm(self.forces, axis=1)
         new_norm = np.linalg.norm(new_forces, axis=1)
 
@@ -195,7 +163,6 @@ class MOFEnv:
 
         reward = np.log(old_norm) - np.log(new_norm)
 
-        # ---- done ----
         done = False
 
         if np.mean(new_norm) < self.fmax_threshold:
@@ -204,11 +171,11 @@ class MOFEnv:
         if self.step_count >= self.max_steps:
             done = True
 
-        # ---- update state ----
         self.prev_disp = disp.copy()
         self.prev_forces = self.forces.copy()
         self.forces = new_forces.copy()
 
         obs = self._obs()
 
-        return obs, reward, done
+        # ✨ 중요 추가
+        return obs.astype(np.float32), reward, done
