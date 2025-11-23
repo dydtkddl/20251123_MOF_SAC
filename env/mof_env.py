@@ -4,19 +4,6 @@ from ase.data import covalent_radii
 
 
 class MOFEnv:
-    """
-    MACS-MOF environment
-
-    obs per atom = concat(
-        fᵢᵗ,
-        f(nei1)...f(nei_k),
-        |r1|...|rk|,
-        r1...rk
-    )
-
-    reward_i = log(|gᵢᵗ|) - log(|gᵢᵗ⁺¹|)
-    """
-
 
     def __init__(
         self,
@@ -25,8 +12,8 @@ class MOFEnv:
         cmax=0.4,
         max_steps=300,
         fmax_threshold=0.05,
-        bond_break_ratio=1.8,    # 🔥 bond break threshold
-        bond_penalty=100.0       # 🔥 reward penalty
+        bond_break_ratio=1.8,
+        bond_penalty=100.0,
     ):
         self.atoms_loader = atoms_loader
         self.k = k_neighbors
@@ -34,11 +21,44 @@ class MOFEnv:
         self.max_steps = max_steps
         self.fmax_threshold = fmax_threshold
 
-        # bond parameters
         self.bond_break_ratio = bond_break_ratio
         self.bond_penalty = bond_penalty
 
         self.reset()
+
+
+    ############################################################
+    def _detect_true_bonds(self, atoms):
+        """
+        진짜 화학 결합만 정확히 탐지하는 알고리즘:
+        covalent radius sum + tolerance 방식
+        """
+
+        pos = atoms.positions
+        cell = atoms.cell
+
+        # PBC 포함 neighbor list 생성
+        i, j, offsets = neighbor_list("ijS", atoms, cutoff=4.0)
+
+        bond_pairs = []
+        bond_d0 = []
+
+        for a, b, off in zip(i, j, offsets):
+
+            # 거리 계산 (PBC 적용)
+            r_ab = pos[b] + off @ cell - pos[a]
+            d = np.linalg.norm(r_ab)
+
+            # 두 원자의 covalent radius 합
+            r_cov = covalent_radii[atoms[a].number] + covalent_radii[atoms[b].number]
+
+            # 허용 오차 0.4 Å
+            if d <= r_cov + 0.4:
+                bond_pairs.append((a, b))
+                bond_d0.append(d)
+
+        # numpy array 로 변환하며 순서 보존
+        return np.array(bond_pairs, dtype=int), np.array(bond_d0, dtype=float)
 
 
     ############################################################
@@ -47,28 +67,24 @@ class MOFEnv:
         self.atoms = self.atoms_loader()
         self.N = len(self.atoms)
 
-        # initial forces
+        # Initial forces
         self.forces = self.atoms.get_forces()
 
-        # history
+        # History
         self.prev_forces = np.zeros_like(self.forces)
         self.prev_disp = np.zeros_like(self.forces)
 
-        # covalent radii
+        # Covalent radii
         self.covalent_radii = np.array(
             [covalent_radii[a.number] for a in self.atoms]
         )
 
-        # ================================================
-        # 🔥 save initial bond distances to prevent breakage
-        # ================================================
-        i, j, offsets = neighbor_list("ijS", self.atoms, cutoff=3.0)
-        pos = self.atoms.positions
-        rel = pos[j] + offsets @ self.atoms.cell - pos[i]
-        d0 = np.linalg.norm(rel, axis=1)
+        # =======================================
+        # 🔥 진짜 bond detection 수행
+        # =======================================
+        self.bond_pairs, self.bond_d0 = self._detect_true_bonds(self.atoms)
 
-        self.bond_pairs = np.stack([i, j], axis=1)
-        self.bond_d0 = d0
+        print(f"Detected {len(self.bond_pairs)} true bonds")
 
         self.step_count = 0
 
@@ -77,30 +93,21 @@ class MOFEnv:
 
     ############################################################
     def _compute_neighbors(self):
-
         i, j, offsets = neighbor_list("ijS", self.atoms, cutoff=6.0)
-
-        rel = (
-            self.atoms.positions[j]
-            + offsets @ self.atoms.cell
-            - self.atoms.positions[i]
-        )
+        rel = self.atoms.positions[j] + offsets @ self.atoms.cell - self.atoms.positions[i]
 
         nd = {idx: [] for idx in range(self.N)}
         for a, b, r in zip(i, j, rel):
             nd[a].append((b, r))
 
         for idx in range(self.N):
-            nd[idx] = sorted(
-                nd[idx], key=lambda x: np.linalg.norm(x[1])
-            )[: self.k]
+            nd[idx] = sorted(nd[idx], key=lambda x: np.linalg.norm(x[1]))[: self.k]
 
         return nd
 
 
     ############################################################
     def _make_feature(self, idx):
-
         ri = self.covalent_radii[idx]
 
         gi = self.forces[idx]
@@ -115,19 +122,16 @@ class MOFEnv:
         di = self.prev_disp[idx]
         dgi = gi - gprev
 
-        fi = np.concatenate([
+        return np.concatenate([
             np.array([ri, cti, loggn]),
             gi,
             di,
             dgi,
         ])
 
-        return fi
-
 
     ############################################################
     def _obs(self):
-
         neighbors = self._compute_neighbors()
         obs_list = []
 
@@ -136,15 +140,15 @@ class MOFEnv:
             fi = self._make_feature(i)
             block = [fi]
 
-            # fk neighbors
+            # neighbors
             for (j, rel) in neighbors[i]:
                 block.append(self._make_feature(j))
 
-            # padding neighbors (missing)
+            # padding
             for _ in range(self.k - len(neighbors[i])):
                 block.append(np.zeros_like(fi))
 
-            # distances + vectors
+            # distance + vector
             dists = []
             vecs = []
 
@@ -156,14 +160,10 @@ class MOFEnv:
                 dists.append(0.0)
                 vecs.append(np.zeros(3))
 
-            dists = np.array(dists)
-            vecs = np.array(vecs)
+            block.append(np.array(dists))
+            block.append(np.array(vecs).reshape(-1))
 
-            block.append(dists)
-            block.append(vecs.reshape(-1))
-
-            oi = np.concatenate(block)
-            obs_list.append(oi)
+            obs_list.append(np.concatenate(block))
 
         return np.array(obs_list, dtype=np.float32)
 
@@ -173,17 +173,15 @@ class MOFEnv:
 
         self.step_count += 1
 
-        # compute cᵢᵗ
+        # displacement scale
         gnorm = np.linalg.norm(self.forces, axis=1)
         gnorm = np.where(gnorm > 1e-12, gnorm, 1e-12)
         c = np.minimum(gnorm, self.cmax).reshape(-1, 1)
 
-        # scaled displacement
         disp = c * action
-
         self.atoms.positions += disp
 
-        # new forces
+        # compute new forces
         new_forces = self.atoms.get_forces()
 
         old_norm = np.linalg.norm(self.forces, axis=1)
@@ -196,38 +194,38 @@ class MOFEnv:
 
         done = False
 
-        # =====================================================
-        # 🔥 bond length check → penalty + done
-        # =====================================================
+        # =====================================
+        # 🔥 bond 유지 체크 — 순서 100% 동일하게 비교
+        # =====================================
         pos = self.atoms.positions
         broken = False
 
         for idx, (a, b) in enumerate(self.bond_pairs):
+
             d0 = self.bond_d0[idx]
             d = np.linalg.norm(pos[a] - pos[b])
 
+            # stretch
             if d > self.bond_break_ratio * d0:
                 reward -= self.bond_penalty
                 broken = True
+
+            # compression (optional)
             if d < 0.6 * d0:
                 reward -= self.bond_penalty
                 broken = True
+
         if broken:
             done = True
 
-
-        # termination by force threshold
         if np.mean(new_norm) < self.fmax_threshold:
             done = True
 
         if self.step_count >= self.max_steps:
             done = True
 
-        # update histories
         self.prev_disp = disp.copy()
         self.prev_forces = self.forces.copy()
         self.forces = new_forces.copy()
 
-        obs = self._obs()
-
-        return obs, reward, done
+        return self._obs(), reward, done
