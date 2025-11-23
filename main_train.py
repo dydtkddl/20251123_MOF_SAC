@@ -164,7 +164,7 @@ for ep in range(EPOCHS):
         if (step % SWITCH_N == 0) or (obs is None):
             cif = sample_cif()
             atoms = read(cif)
-            atoms = perturb(atoms)
+            # atoms = perturb(atoms)
             atoms.calc = calc
 
             env = MOFEnv(
@@ -172,6 +172,7 @@ for ep in range(EPOCHS):
                 k_neighbors=12,
                 fmax_threshold=FMAX_THRESH,
                 max_steps=MAX_STEPS,
+                cmax=0.05
             )
 
             obs = env.reset()
