@@ -4,6 +4,7 @@ import numpy as np
 from copy import deepcopy
 from ase.neighborlist import neighbor_list
 
+from ase.data import covalent_radii
 
 class MOFEnv:
     """
@@ -51,8 +52,9 @@ class MOFEnv:
         self.prev_forces = np.zeros_like(self.forces)
         self.prev_disp = np.zeros_like(self.forces)
 
-        self.covalent_radii = np.array([atm.covalent_radius for atm in self.atoms])
-
+        self.covalent_radii = np.array([
+            covalent_radii[atm.number] for atm in self.atoms
+        ])
         self.step_count = 0
 
         return self._obs()
