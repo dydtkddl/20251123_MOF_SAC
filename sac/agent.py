@@ -53,6 +53,14 @@ class SACAgent:
         self.alpha_opt = optim.Adam([self.log_alpha], lr=lr)
 
         self.total_steps = 0
+        ########################################################
+        # FORCE ALL NETWORK PARAMETERS TO FP32
+        ########################################################
+        self.actor.float()
+        self.v.float()
+        self.v_tgt.float()
+        self.q1.float()
+        self.q2.float()
 
 
     @property
