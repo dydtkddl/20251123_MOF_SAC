@@ -166,108 +166,108 @@ class MOFEnv:
             obs_list.append(np.concatenate(block))
 
         return np.array(obs_list, dtype=np.float32)
-############################################################
-def step(self, action):
+    ############################################################
+    def step(self, action):
 
-    self.step_count += 1
+        self.step_count += 1
 
-    # displacement scale
-    gnorm = np.linalg.norm(self.forces, axis=1)
-    gnorm = np.where(gnorm > 1e-12, gnorm, 1e-12)
-    c = np.minimum(gnorm, self.cmax).reshape(-1, 1)
+        # displacement scale
+        gnorm = np.linalg.norm(self.forces, axis=1)
+        gnorm = np.where(gnorm > 1e-12, gnorm, 1e-12)
+        c = np.minimum(gnorm, self.cmax).reshape(-1, 1)
 
-    # displacement applied this step
-    disp = c * action
-    self.atoms.positions += disp
+        # displacement applied this step
+        disp = c * action
+        self.atoms.positions += disp
 
-    # compute new forces
-    new_forces = self.atoms.get_forces()
+        # compute new forces
+        new_forces = self.atoms.get_forces()
 
-    old_norm = np.linalg.norm(self.forces, axis=1)
-    new_norm = np.linalg.norm(new_forces, axis=1)
+        old_norm = np.linalg.norm(self.forces, axis=1)
+        new_norm = np.linalg.norm(new_forces, axis=1)
 
-    old_norm = np.where(old_norm > 1e-12, old_norm, 1e-12)
-    new_norm = np.where(new_norm > 1e-12, new_norm, 1e-12)
+        old_norm = np.where(old_norm > 1e-12, old_norm, 1e-12)
+        new_norm = np.where(new_norm > 1e-12, new_norm, 1e-12)
 
-    reward = np.log(old_norm) - np.log(new_norm)
+        reward = np.log(old_norm) - np.log(new_norm)
 
-    done = False
+        done = False
 
-    # =====================================
-    # 🔥 EXTREME DEBUG: full per-bond info
-    # =====================================
-    pos = self.atoms.positions
-    broken = False
+        # =====================================
+        # 🔥 EXTREME DEBUG: full per-bond info
+        # =====================================
+        pos = self.atoms.positions
+        broken = False
 
-    for idx, (a, b) in enumerate(self.bond_pairs):
+        for idx, (a, b) in enumerate(self.bond_pairs):
 
-        d0 = self.bond_d0[idx]
-        d = np.linalg.norm(pos[a] - pos[b])
-        ratio = d / d0 if d0 > 1e-12 else 999
+            d0 = self.bond_d0[idx]
+            d = np.linalg.norm(pos[a] - pos[b])
+            ratio = d / d0 if d0 > 1e-12 else 999
 
-        # NEW: force magnitude per-atom
-        Fa = np.linalg.norm(self.forces[a])
-        Fb = np.linalg.norm(self.forces[b])
+            # NEW: force magnitude per-atom
+            Fa = np.linalg.norm(self.forces[a])
+            Fb = np.linalg.norm(self.forces[b])
 
-        # NEW: displacement magnitude per-atom
-        da = np.linalg.norm(disp[a])
-        db = np.linalg.norm(disp[b])
+            # NEW: displacement magnitude per-atom
+            da = np.linalg.norm(disp[a])
+            db = np.linalg.norm(disp[b])
 
-        # NEW: new force magnitude after step
-        Fna = np.linalg.norm(new_forces[a])
-        Fnb = np.linalg.norm(new_forces[b])
+            # NEW: new force magnitude after step
+            Fna = np.linalg.norm(new_forces[a])
+            Fnb = np.linalg.norm(new_forces[b])
 
-        print("\n" + "="*80)
-        print(f"[BOND CHECK #{idx}] atoms ({a},{b}) [{self.atoms[a].symbol}, {self.atoms[b].symbol}]")
-        print("-"*80)
+            print("\n" + "="*80)
+            print(f"[BOND CHECK #{idx}] atoms ({a},{b}) [{self.atoms[a].symbol}, {self.atoms[b].symbol}]")
+            print("-"*80)
 
-        print(f"Initial bond length d0:        {d0:.6f} Å")
-        print(f"Current bond length d:         {d:.6f} Å")
-        print(f"Bond ratio (d/d0):             {ratio:.6f}")
-        print(f"Stretch threshold:             {self.bond_break_ratio:.2f} × d0 = {self.bond_break_ratio*d0:.6f}")
-        print(f"Compress threshold:            0.60 × d0 = {0.6*d0:.6f}")
-        print("")
+            print(f"Initial bond length d0:        {d0:.6f} Å")
+            print(f"Current bond length d:         {d:.6f} Å")
+            print(f"Bond ratio (d/d0):             {ratio:.6f}")
+            print(f"Stretch threshold:             {self.bond_break_ratio:.2f} × d0 = {self.bond_break_ratio*d0:.6f}")
+            print(f"Compress threshold:            0.60 × d0 = {0.6*d0:.6f}")
+            print("")
 
-        print(f"Force  |F[a]| pre-step:        {Fa:.6f}   (atom {a})")
-        print(f"Force  |F[b]| pre-step:        {Fb:.6f}   (atom {b})")
-        print(f"Force  |F[a]| post-step:       {Fna:.6f}  (new)")
-        print(f"Force  |F[b]| post-step:       {Fnb:.6f}  (new)")
-        print("")
+            print(f"Force  |F[a]| pre-step:        {Fa:.6f}   (atom {a})")
+            print(f"Force  |F[b]| pre-step:        {Fb:.6f}   (atom {b})")
+            print(f"Force  |F[a]| post-step:       {Fna:.6f}  (new)")
+            print(f"Force  |F[b]| post-step:       {Fnb:.6f}  (new)")
+            print("")
 
-        print(f"Disp   |disp[a]| this step:    {da:.6f} Å")
-        print(f"Disp   |disp[b]| this step:    {db:.6f} Å")
-        print("")
+            print(f"Disp   |disp[a]| this step:    {da:.6f} Å")
+            print(f"Disp   |disp[b]| this step:    {db:.6f} Å")
+            print("")
 
-        # -------------------------------
-        # break/stretch/compress checks
-        # -------------------------------
-        if d > self.bond_break_ratio * d0:
-            print(">>> BOND STRETCH BREAK DETECTED! (penalty applied)")
-            reward -= self.bond_penalty
-            broken = True
+            # -------------------------------
+            # break/stretch/compress checks
+            # -------------------------------
+            if d > self.bond_break_ratio * d0:
+                print(">>> BOND STRETCH BREAK DETECTED! (penalty applied)")
+                reward -= self.bond_penalty
+                broken = True
 
-        elif d < 0.6 * d0:
-            print(">>> BOND COMPRESS BREAK DETECTED! (penalty applied)")
-            reward -= self.bond_penalty
-            broken = True
-        else:
-            print("Bond OK")
+            elif d < 0.6 * d0:
+                print(">>> BOND COMPRESS BREAK DETECTED! (penalty applied)")
+                reward -= self.bond_penalty
+                broken = True
+            else:
+                print("Bond OK")
 
-        print("="*80 + "\n")
+            print("="*80 + "\n")
 
-    if broken:
-        done = True
+        if broken:
+            done = True
 
-    # termination by force threshold
-    if np.mean(new_norm) < self.fmax_threshold:
-        done = True
+        # termination by force threshold
+        if np.mean(new_norm) < self.fmax_threshold:
+            done = True
 
-    if self.step_count >= self.max_steps:
-        done = True
+        if self.step_count >= self.max_steps:
+            done = True
 
-    # update histories
-    self.prev_disp = disp.copy()
-    self.prev_forces = self.forces.copy()
-    self.forces = new_forces.copy()
+        # update histories
+        self.prev_disp = disp.copy()
+        self.prev_forces = self.forces.copy()
+        self.forces = new_forces.copy()
 
-    return self._obs(), reward, done
+        return self._obs(), reward, done
