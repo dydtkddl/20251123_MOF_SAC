@@ -205,18 +205,18 @@ class MOFEnv:
     # ============================================================
     # Relative vector (FIXED: PBC-aware)
 
-    def _rel_vec(self, i, j):
-        # raw displacement
-        disp = self.atoms.positions[j] - self.atoms.positions[i]
-        # apply minimum-image convention (PBC safe)
-        rij, _ = find_mic(disp[None], cell=self.atoms.cell)
-        return rij[0]
     # def _rel_vec(self, i, j):
+    #     # raw displacement
     #     disp = self.atoms.positions[j] - self.atoms.positions[i]
-    #     cell = self.atoms.cell.array
-    #     frac = np.linalg.solve(cell.T, disp)    # fractional coords
-    #     frac -= np.round(frac)                  # minimum image
-    #     return frac @ cell
+    #     # apply minimum-image convention (PBC safe)
+    #     rij, _ = find_mic(disp[None], cell=self.atoms.cell)
+    #     return rij[0]
+    def _rel_vec(self, i, j):
+        disp = self.atoms.positions[j] - self.atoms.positions[i]
+        cell = self.atoms.cell.array
+        frac = np.linalg.solve(cell.T, disp)    # fractional coords
+        frac -= np.round(frac)                  # minimum image
+        return frac @ cell
 
 
     # ============================================================
