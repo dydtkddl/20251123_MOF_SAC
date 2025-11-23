@@ -25,7 +25,7 @@ class MOFEnv:
     ):
         self.atoms_loader = atoms_loader
 
-        # number of neighbors to keep after top-k attention
+        # number of neighbors (slots)
         self.k = k_neighbors
 
         self.cmax = cmax
@@ -41,7 +41,6 @@ class MOFEnv:
         self.w_f = w_f
         self.w_e = w_e
 
-        # Placeholder until reset
         self.feature_dim = None
 
         self.reset()
@@ -91,9 +90,10 @@ class MOFEnv:
 
 
     # ============================================================
+    # RESET
+    # ============================================================
     def reset(self):
 
-        # Load structure
         self.atoms = self.atoms_loader()
         self.N = len(self.atoms)
 
@@ -109,7 +109,7 @@ class MOFEnv:
         self.bond_pairs, self.bond_d0 = self._detect_true_bonds(self.atoms)
         print(f"[INIT] Detected true bonds = {len(self.bond_pairs)}")
 
-        # Adjacency
+        # Build adjacency
         self.adj = {i: [] for i in range(self.N)}
         for a, b in self.bond_pairs:
             self.adj[a].append(b)
@@ -117,16 +117,12 @@ class MOFEnv:
 
         Z = np.array([a.number for a in self.atoms])
 
-        # --------------------------
-        # Aromatic detection
-        # --------------------------
+        # ---------- Aromatic
         aromatic_nodes = self._detect_aromatic_nodes(self.adj)
         self.is_aromatic = np.zeros(self.N, dtype=np.float32)
         self.is_aromatic[list(aromatic_nodes)] = 1.0
 
-        # --------------------------
-        # Atomic roles
-        # --------------------------
+        # ---------- Atomic roles
         self.is_metal = (Z > 20).astype(np.float32)
         self.is_carboxylate_O = np.zeros(self.N, dtype=np.float32)
         self.is_mu2O = np.zeros(self.N, dtype=np.float32)
@@ -134,16 +130,16 @@ class MOFEnv:
         self.is_linker = np.zeros(self.N, dtype=np.float32)
         self.is_aromatic_C = np.zeros(self.N, dtype=np.float32)
 
-        # Carboxylate
+        # Carboxylate O
         for i in range(self.N):
-            if Z[i] == 8:  # oxygen
+            if Z[i] == 8:
                 for c in self.adj[i]:
-                    if Z[c] == 6:  # carbon
+                    if Z[c] == 6:
                         O2 = [x for x in self.adj[c] if Z[x] == 8 and x != i]
                         if len(O2) > 0:
                             self.is_carboxylate_O[i] = 1.0
 
-        # μ2-O / μ3-O
+        # μ2-O, μ3-O
         for i in range(self.N):
             if Z[i] == 8:
                 metal_neighbors = sum(self.is_metal[j] for j in self.adj[i])
@@ -152,71 +148,53 @@ class MOFEnv:
                 if metal_neighbors >= 3:
                     self.is_mu3O[i] = 1.0
 
-        # Aromatic C
+        # Aromatic carbon
         for i in range(self.N):
             if Z[i] == 6 and self.is_aromatic[i] == 1.0:
                 self.is_aromatic_C[i] = 1.0
 
-        # Linker atoms (C or N but not metal/carboxylate/aromatic)
+        # Linker atoms
         for i in range(self.N):
             if (not self.is_metal[i]) and (not self.is_carboxylate_O[i]) and (not self.is_aromatic_C[i]):
                 if Z[i] in [6, 7]:
                     self.is_linker[i] = 1.0
 
-        # --------------------------
-        # Bond class counts (6)
-        # --------------------------
+        # Bond-type counts
         self.bond_types = np.zeros((self.N, 6), dtype=np.float32)
-
         for a, b in self.bond_pairs:
 
-            # METAL–O
             if self.is_metal[a] and Z[b] == 8:
                 self.bond_types[a][0] += 1
                 self.bond_types[b][0] += 1
 
-            # METAL–N
             if self.is_metal[a] and Z[b] == 7:
                 self.bond_types[a][1] += 1
                 self.bond_types[b][1] += 1
 
-            # CARBOXYLATE
             if self.is_carboxylate_O[a] or self.is_carboxylate_O[b]:
                 self.bond_types[a][2] += 1
                 self.bond_types[b][2] += 1
 
-            # AROMATIC C–C
-            if (self.is_aromatic[a] and self.is_aromatic[b] and Z[a] == 6 and Z[b] == 6):
+            if (
+                self.is_aromatic[a]
+                and self.is_aromatic[b]
+                and Z[a] == 6
+                and Z[b] == 6
+            ):
                 self.bond_types[a][3] += 1
                 self.bond_types[b][3] += 1
 
-            # μ2O
             if self.is_mu2O[a] or self.is_mu2O[b]:
                 self.bond_types[a][4] += 1
                 self.bond_types[b][4] += 1
 
-            # μ3O
             if self.is_mu3O[a] or self.is_mu3O[b]:
                 self.bond_types[a][5] += 1
                 self.bond_types[b][5] += 1
 
-        # --------------------------
-        # Pre-compute feature size
-        # --------------------------
-        self.feature_dim = len(
-            self._make_feature(0)
-        )  # after chemistry features included
+        # Feature dim
+        self.feature_dim = len(self._make_feature(0))
 
-        # --------------------------
-        # Build attention MLP
-        # --------------------------
-        self.att_mlp = nn.Sequential(
-            nn.Linear(self.feature_dim * 2 + 3, 64),
-            nn.ReLU(),
-            nn.Linear(64, 1)
-        ).to("cpu")
-
-        # --------------------------
         self.E_prev = self.atoms.get_potential_energy()
         self.step_count = 0
 
@@ -224,35 +202,37 @@ class MOFEnv:
 
 
     # ============================================================
-    # Relative vector (no wrap because BFS graph prevents drift)
+    # Relative vector
     # ============================================================
     def _rel_vec(self, i, j):
         return self.atoms.positions[j] - self.atoms.positions[i]
 
 
     # ============================================================
-    # 3-hop neighbor extraction
+    # Hop sets (1, 2, 3-hop)
     # ============================================================
-    def _get_khop_neighbors(self, idx, K=3):
+    def _get_hop_sets(self, idx, max_hop=3):
         visited = set([idx])
         frontier = [idx]
-        all_neighbors = []
 
-        for _ in range(K):
+        hop_map = {1: [], 2: [], 3: []}
+
+        for hop in range(1, max_hop + 1):
             next_frontier = []
             for node in frontier:
                 for nxt in self.adj[node]:
                     if nxt not in visited:
                         visited.add(nxt)
                         next_frontier.append(nxt)
-                        all_neighbors.append(nxt)
+                        hop_map[hop].append(nxt)
+
             frontier = next_frontier
 
-        return list(set(all_neighbors))
+        return hop_map
 
 
     # ============================================================
-    # MAKE FEATURE (core + chemistry)
+    # MAKE FEATURE
     # ============================================================
     def _make_feature(self, idx):
 
@@ -282,7 +262,7 @@ class MOFEnv:
 
 
     # ============================================================
-    # OBSERVATION (3-hop + attention + top-K neighbor selection)
+    # OBS (Hop-priority neighbor selection)
     # ============================================================
     def _obs(self):
 
@@ -292,63 +272,60 @@ class MOFEnv:
 
             fi = self._make_feature(i)
 
-            # ---------------------------------
-            # gather 3-hop neighbors
-            # ---------------------------------
-            khop = self._get_khop_neighbors(i, K=3)
+            hop_sets = self._get_hop_sets(i, max_hop=3)
 
-            if len(khop) == 0:
-                # fallback to zero-padding
-                block = [fi] + [np.zeros_like(fi) for _ in range(self.k)]
-                dists = [0.0] * self.k
-                vecs = np.zeros((self.k, 3))
-                block.append(np.array(dists))
-                block.append(vecs.reshape(-1))
-                obs_list.append(np.concatenate(block))
-                continue
+            selected = []
 
-            # ---------------------------------
-            # compute attention score per neighbor
-            # ---------------------------------
-            scores = []
+            # ----------------------------
+            # 1-hop neighbors (highest priority)
+            # ----------------------------
+            for j in hop_sets[1]:
+                if len(selected) < self.k:
+                    selected.append(j)
+
+            # ----------------------------
+            # 2-hop neighbors (second priority)
+            # ----------------------------
+            for j in hop_sets[2]:
+                if len(selected) < self.k:
+                    selected.append(j)
+
+            # ----------------------------
+            # 3-hop neighbors (random fill)
+            # ----------------------------
+            remain = self.k - len(selected)
+            if remain > 0 and len(hop_sets[3]) > 0:
+                candidates = hop_sets[3]
+                if len(candidates) <= remain:
+                    selected += candidates
+                else:
+                    selected += list(np.random.choice(candidates, remain, replace=False))
+
+            # Padding for missing neighbors
+            while len(selected) < self.k:
+                selected.append(None)
+
+            # Collect neighbor feats and rel vectors
             nbr_feats = []
-            nbr_vecs = []
+            dists = []
+            vecs = []
 
-            for j in khop:
-                fj = self._make_feature(j)
-                rel = self._rel_vec(i, j)
+            for j in selected:
+                if j is None:
+                    nbr_feats.append(np.zeros_like(fi))
+                    dists.append(0.0)
+                    vecs.append(np.zeros(3))
+                else:
+                    fj = self._make_feature(j)
+                    rel = self._rel_vec(i, j)
 
-                x = np.concatenate([fi, fj, rel])
-                x = torch.tensor(x, dtype=torch.float32)
-                s = float(self.att_mlp(x).item())
+                    nbr_feats.append(fj)
+                    dists.append(np.linalg.norm(rel))
+                    vecs.append(rel)
 
-                scores.append(s)
-                nbr_feats.append(fj)
-                nbr_vecs.append(rel)
-
-            # ---------------------------------
-            # select top-k neighbors
-            # ---------------------------------
-            if len(scores) > self.k:
-                idxs = np.argsort(scores)[-self.k:]
-            else:
-                idxs = np.arange(len(scores))
-
-            top_feats = [nbr_feats[m] for m in idxs]
-            top_vecs = [nbr_vecs[m] for m in idxs]
-
-            # padding
-            while len(top_feats) < self.k:
-                top_feats.append(np.zeros_like(fi))
-                top_vecs.append(np.zeros(3))
-
-            # distances
-            dists = [np.linalg.norm(v) for v in top_vecs]
-
-            # build observation block
-            block = [fi] + top_feats
+            block = [fi] + nbr_feats
             block.append(np.array(dists))
-            block.append(np.array(top_vecs).reshape(-1))
+            block.append(np.array(vecs).reshape(-1))
 
             obs_list.append(np.concatenate(block))
 
@@ -386,6 +363,7 @@ class MOFEnv:
         pbc = self.atoms.pbc
 
         for idx, (a, b) in enumerate(self.bond_pairs):
+
             d = get_distances(
                 self.atoms.positions[a][None],
                 self.atoms.positions[b][None],
@@ -413,4 +391,3 @@ class MOFEnv:
         self.forces = new_forces.copy()
 
         return self._obs(), reward, done
-
