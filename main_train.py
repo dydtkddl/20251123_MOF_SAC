@@ -94,8 +94,8 @@ calc = MACECalculator(
 # CONFIG
 ############################################################
 EPOCHS      = 200
-MAX_STEPS   = 1000
-SWITCH_N    = 1000
+MAX_STEPS   = 300
+SWITCH_N    = 300
 FMAX_THRESH = 0.05
 
 BUFFER_SIZE = 3_000_000
@@ -172,7 +172,7 @@ for ep in range(EPOCHS):
                 k_neighbors=12,
                 fmax_threshold=FMAX_THRESH,
                 max_steps=MAX_STEPS,
-                cmax=0.05
+                cmax=0.03
             )
 
             obs = env.reset()
