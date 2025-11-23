@@ -33,19 +33,28 @@ class SACAgent:
         self.gamma = gamma
         self.tau = tau
 
+        # -----------------
+        # models
+        # -----------------
         self.actor = Actor(obs_dim, act_dim).to(self.device)
-        self.actor_opt = optim.Adam(self.actor.parameters(), lr=lr)
-
-        self.v = CriticV(obs_dim).to(self.device)
+        self.v     = CriticV(obs_dim).to(self.device)
         self.v_tgt = CriticV(obs_dim).to(self.device)
+        self.q1    = CriticQ(obs_dim, act_dim).to(self.device)
+        self.q2    = CriticQ(obs_dim, act_dim).to(self.device)
+
         self.v_tgt.load_state_dict(self.v.state_dict())
-        self.v_opt = optim.Adam(self.v.parameters(), lr=lr)
 
-        self.q1 = CriticQ(obs_dim, act_dim).to(self.device)
-        self.q2 = CriticQ(obs_dim, act_dim).to(self.device)
-        self.q1_opt = optim.Adam(self.q1.parameters(), lr=lr)
-        self.q2_opt = optim.Adam(self.q2.parameters(), lr=lr)
+        # -----------------
+        # optimizers
+        # -----------------
+        self.actor_opt = optim.Adam(self.actor.parameters(), lr=lr)
+        self.v_opt     = optim.Adam(self.v.parameters(), lr=lr)
+        self.q1_opt    = optim.Adam(self.q1.parameters(), lr=lr)
+        self.q2_opt    = optim.Adam(self.q2.parameters(), lr=lr)
 
+        # -----------------
+        # entropy tuning
+        # -----------------
         self.target_entropy = -act_dim
         self.log_alpha = torch.zeros(
             1, requires_grad=True, device=self.device
@@ -53,14 +62,17 @@ class SACAgent:
         self.alpha_opt = optim.Adam([self.log_alpha], lr=lr)
 
         self.total_steps = 0
+
+
         ########################################################
         # FORCE ALL NETWORK PARAMETERS TO FP32
         ########################################################
         self.actor.float()
         self.v.float()
-        self.v_tgt.float()
+       	self.v_tgt.float()
         self.q1.float()
         self.q2.float()
+
 
 
     @property
@@ -68,30 +80,30 @@ class SACAgent:
         return self.log_alpha.exp()
 
 
+
     @torch.no_grad()
     def act(self, obs):
 
-        # **FORCE FP32 HERE**
         obs = torch.as_tensor(
-            obs,
-            dtype=torch.float32,
-            device=self.device
+            obs, dtype=torch.float32, device=self.device
         )
 
         a, _, _, _ = self.actor(obs)
         return a.cpu().numpy()
 
 
+
+    ############################################################
     def update(self):
 
         batch = self.replay.sample(self.batch_size)
 
-        # **FORCE FP32 HERE**
-        obs  = torch.tensor(batch["obs"],  dtype=torch.float32, device=self.device)
-        act  = torch.tensor(batch["act"],  dtype=torch.float32, device=self.device)
-        rew  = torch.tensor(batch["rew"],  dtype=torch.float32, device=self.device).unsqueeze(1)
-        nobs = torch.tensor(batch["nobs"], dtype=torch.float32, device=self.device)
-        done = torch.tensor(batch["done"], dtype=torch.float32, device=self.device).unsqueeze(1)
+        # FP32 -- critical
+        obs  = torch.as_tensor(batch["obs"],  dtype=torch.float32, device=self.device)
+        act  = torch.as_tensor(batch["act"],  dtype=torch.float32, device=self.device)
+        rew  = torch.as_tensor(batch["rew"],  dtype=torch.float32, device=self.device).unsqueeze(1)
+        nobs = torch.as_tensor(batch["nobs"], dtype=torch.float32, device=self.device)
+        done = torch.as_tensor(batch["done"], dtype=torch.float32, device=self.device).unsqueeze(1)
 
 
         # α update
@@ -106,7 +118,7 @@ class SACAgent:
         # Q update
         with torch.no_grad():
             v_next = self.v_tgt(nobs)
-            q_target = rew + (1-done) * self.gamma * v_next
+            q_target = rew + (1 - done) * self.gamma * v_next
 
         q1_pred = self.q1(obs, act)
         q2_pred = self.q2(obs, act)
@@ -128,7 +140,7 @@ class SACAgent:
         with torch.no_grad():
             q_new = torch.min(
                 self.q1(obs, new_action),
-                self.q2(obs, new_action)
+                self.q2(obs, new_action),
             )
         v_tgt = q_new - self.alpha * logp
 
@@ -157,10 +169,16 @@ class SACAgent:
 
             self.soft_update()
 
+
         self.total_steps += 1
 
 
+
+    ############################################################
     def soft_update(self):
+
         with torch.no_grad():
             for t, s in zip(self.v_tgt.parameters(), self.v.parameters()):
-                t.data.copy_( self.tau*s.data + (1-self.tau)*t.data )
+                t.data.copy_(
+                    self.tau * s.data + (1 - self.tau) * t.data
+                )
