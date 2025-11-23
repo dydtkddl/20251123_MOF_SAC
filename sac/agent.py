@@ -140,9 +140,16 @@ class SACAgent:
         with torch.no_grad():
             q_new = torch.min(
                 self.q1(obs, new_action),
-                self.q2(obs, new_action),
+                self.q2(obs, new_action)
             )
         v_tgt = q_new - self.alpha * logp
+
+        #########################################################
+        # 🔥 CRITICAL FIX — force fp32 here
+        #########################################################
+        v_pred = v_pred.float()
+        v_tgt  = v_tgt.float()
+        #########################################################
 
         v_loss = F.mse_loss(v_pred, v_tgt)
 
