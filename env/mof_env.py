@@ -202,10 +202,16 @@ class MOFEnv:
 
 
     # ============================================================
-    # Relative vector
+    # Relative vector (FIXED: PBC-aware)
     # ============================================================
     def _rel_vec(self, i, j):
-        return self.atoms.positions[j] - self.atoms.positions[i]
+        _, rel = get_distances(
+            self.atoms.positions[i][None],
+            self.atoms.positions[j][None],
+            cell=self.atoms.cell,
+            pbc=self.atoms.pbc
+        )
+        return rel[0][0]
 
 
     # ============================================================
