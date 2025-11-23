@@ -203,15 +203,15 @@ class MOFEnv:
 
     # ============================================================
     # Relative vector (FIXED: PBC-aware)
-    # ============================================================
+    from ase.geometry import find_mic
+
     def _rel_vec(self, i, j):
-        _, rel = get_distances(
-            self.atoms.positions[i][None],
-            self.atoms.positions[j][None],
-            cell=self.atoms.cell,
-            pbc=self.atoms.pbc
-        )
-        return rel[0][0]
+        # raw displacement
+        disp = self.atoms.positions[j] - self.atoms.positions[i]
+        # apply minimum-image convention (PBC safe)
+        rij, _ = find_mic(disp[None], cell=self.atoms.cell)
+        return rij[0]
+
 
 
     # ============================================================
