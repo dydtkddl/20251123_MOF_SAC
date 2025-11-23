@@ -30,7 +30,7 @@ logger = logging.getLogger("train")
 ##############################
 # Pool
 ##############################
-POOL_DIR = "mofs/train_pool"
+POOL_DIR = "mofs/train_pool_valid"
 
 
 def sample_cif():
@@ -39,6 +39,7 @@ def sample_cif():
         for f in os.listdir(POOL_DIR)
         if f.endswith(".cif")
     ]
+
     assert len(cifs) > 0
     return np.random.choice(cifs)
 
@@ -111,7 +112,7 @@ for ep in range(EPOCHS):
 
     cif = sample_cif()
     t0 = time.time()
-
+    print(cif)
     atoms = read(cif)
     atoms = perturb(atoms, sigma=0.05)
     atoms.calc = calc

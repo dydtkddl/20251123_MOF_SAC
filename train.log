@@ -1,0 +1,78 @@
+2025-11-23 18:55:30,387 - INFO - CUDA version: 12.1, CUDA device: 0
+2025-11-23 18:55:30,401 - INFO - [MACS-MOF] start epochs=200
+2025-11-23 18:57:22,003 - INFO - CUDA version: 12.1, CUDA device: 0
+2025-11-23 18:57:22,017 - INFO - [MACS-MOF] start epochs=200
+2025-11-23 19:00:34,868 - INFO - CUDA version: 12.1, CUDA device: 0
+2025-11-23 19:02:06,506 - INFO - CUDA version: 12.1, CUDA device: 0
+2025-11-23 19:05:36,360 - INFO - CUDA version: 12.1, CUDA device: 0
+2025-11-23 19:06:38,747 - INFO - CUDA version: 12.1, CUDA device: 0
+2025-11-23 19:14:09,012 - INFO - CUDA version: 12.1, CUDA device: 0
+2025-11-23 19:14:09,026 - INFO - [MACS-MOF] start epochs=200
+2025-11-23 19:14:57,659 - INFO - CUDA version: 12.1, CUDA device: 0
+2025-11-23 19:14:57,673 - INFO - [MACS-MOF] start epochs=200
+2025-11-23 19:14:58,597 - INFO - 
+2025-11-23 19:14:58,597 - INFO - ================ EP 0 ================
+2025-11-23 19:14:58,598 - INFO - CIF sample: mofs/train_pool/qmof-597f45f.cif
+2025-11-23 19:14:58,598 - INFO - N atoms: 118
+2025-11-23 19:17:43,748 - INFO - CUDA version: 12.1, CUDA device: 0
+2025-11-23 19:17:43,762 - INFO - [MACS-MOF] start epochs=200
+2025-11-23 19:17:44,436 - INFO - 
+2025-11-23 19:17:44,436 - INFO - ================ EP 0 ================
+2025-11-23 19:17:44,437 - INFO - CIF sample: mofs/train_pool/qmof-541c7e3.cif
+2025-11-23 19:17:44,437 - INFO - N atoms: 65
+2025-11-23 19:17:58,202 - INFO - CUDA version: 12.1, CUDA device: 0
+2025-11-23 19:17:58,216 - INFO - [MACS-MOF] start epochs=200
+2025-11-23 19:17:58,966 - INFO - 
+2025-11-23 19:17:58,967 - INFO - ================ EP 0 ================
+2025-11-23 19:17:58,967 - INFO - CIF sample: mofs/train_pool/qmof-81dfe71.cif
+2025-11-23 19:17:58,967 - INFO - N atoms: 100
+2025-11-23 19:19:36,578 - INFO - CUDA version: 12.1, CUDA device: 0
+2025-11-23 19:19:36,592 - INFO - [MACS-MOF] start epochs=200
+2025-11-23 19:19:50,024 - INFO - CUDA version: 12.1, CUDA device: 0
+2025-11-23 19:19:50,038 - INFO - [MACS-MOF] start epochs=200
+2025-11-23 19:19:51,079 - INFO - 
+2025-11-23 19:19:51,079 - INFO - ================ EP 0 ================
+2025-11-23 19:19:51,079 - INFO - CIF sample: mofs/train_pool/qmof-1bdd4c5.cif
+2025-11-23 19:19:51,079 - INFO - N atoms: 101
+2025-11-23 19:21:42,307 - INFO - CUDA version: 12.1, CUDA device: 0
+2025-11-23 19:21:42,322 - INFO - [MACS-MOF] start epochs=200
+2025-11-23 19:21:43,222 - INFO - 
+2025-11-23 19:21:43,222 - INFO - ================ EP 0 ================
+2025-11-23 19:21:43,222 - INFO - CIF sample: mofs/train_pool/qmof-a740630.cif
+2025-11-23 19:21:43,222 - INFO - N atoms: 86
+2025-11-23 19:24:30,823 - INFO - CUDA version: 12.1, CUDA device: 0
+2025-11-23 19:24:30,842 - INFO - [MACS-MOF] start epochs=200
+2025-11-23 19:24:35,687 - INFO - CUDA version: 12.1, CUDA device: 0
+2025-11-23 19:24:35,706 - INFO - [MACS-MOF] start epochs=200
+2025-11-23 19:24:36,302 - INFO - 
+2025-11-23 19:24:36,302 - INFO - ================ EP 0 ================
+2025-11-23 19:24:36,302 - INFO - CIF sample: mofs/train_pool/qmof-caa947a.cif
+2025-11-23 19:24:36,302 - INFO - N atoms: 72
+2025-11-23 19:27:40,318 - INFO - CUDA version: 12.1, CUDA device: 0
+2025-11-23 19:27:40,336 - INFO - [MACS-MOF] start epochs=200
+2025-11-23 19:27:41,315 - INFO - 
+2025-11-23 19:27:41,315 - INFO - ================ EP 0 ================
+2025-11-23 19:27:41,316 - INFO - CIF sample: mofs/train_pool/qmof-67389c3.cif
+2025-11-23 19:27:41,316 - INFO - N atoms: 120
+2025-11-23 19:29:08,262 - INFO - CUDA version: 12.1, CUDA device: 0
+2025-11-23 19:29:08,280 - INFO - [MACS-MOF] start epochs=200
+2025-11-23 19:29:13,262 - INFO - CUDA version: 12.1, CUDA device: 0
+2025-11-23 19:29:13,281 - INFO - [MACS-MOF] start epochs=200
+2025-11-23 19:29:18,009 - INFO - CUDA version: 12.1, CUDA device: 0
+2025-11-23 19:29:18,028 - INFO - [MACS-MOF] start epochs=200
+2025-11-23 19:29:18,710 - INFO - 
+2025-11-23 19:29:18,710 - INFO - ================ EP 0 ================
+2025-11-23 19:29:18,710 - INFO - CIF sample: mofs/train_pool/qmof-0c12dcf.cif
+2025-11-23 19:29:18,710 - INFO - N atoms: 80
+2025-11-23 19:33:42,274 - INFO - [EP 0] return = -2.922256
+2025-11-23 19:33:42,274 - INFO - [EP 0] replay size = 80,000
+2025-11-23 19:33:42,275 - INFO - [EP 0] avg reward = -0.002922
+2025-11-23 19:33:42,275 - INFO - [EP 0] mean step ms = 263.407
+2025-11-23 19:33:42,275 - INFO - [EP 0] max  step ms = 1026.225
+2025-11-23 19:33:42,275 - INFO - [EP 0] termination = EOS: max step
+2025-11-23 19:51:38,440 - INFO - CUDA version: 12.1, CUDA device: 0
+2025-11-23 19:51:38,458 - INFO - [MACS-MOF] start epochs=200
+2025-11-23 19:51:39,297 - INFO - 
+2025-11-23 19:51:39,297 - INFO - ================ EP 0 ================
+2025-11-23 19:51:39,297 - INFO - CIF sample: mofs/train_pool_valid/qmof-bd41929.cif
+2025-11-23 19:51:39,297 - INFO - N atoms: 81
