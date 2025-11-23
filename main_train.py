@@ -102,8 +102,11 @@ agent = SACAgent(
 ##############################
 # Allowed element set
 ##############################
-allowed = set(calc.r_max.keys())
-
+try:
+    allowed = set(calc.model.atomic_numbers)
+except:
+    from mace.tools.z_table import atomic_numbers
+    allowed = set(atomic_numbers)
 
 ##############################
 # TRAIN
