@@ -69,7 +69,7 @@ calc = MACECalculator(
 ##############################
 
 EPOCHS      = 200
-MAX_STEPS   = 300
+MAX_STEPS   = 1000
 FMAX_THRESH = 0.05
 
 BUFFER_SIZE = 3_000_000
