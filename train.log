@@ -4529,3 +4529,11 @@
 2025-11-23 23:19:36,906 - INFO - [EP 4][STEP 499] Natom=102 | Favg=829.433899 Fmax=41124.777344 Fmin=0.609246 | rew=1.758258 | replay=388,000 | alpha=0.243720
 2025-11-23 23:19:37,065 - INFO - [EP 4][STEP 500] Natom=102 | Favg=59.864574 Fmax=1576.659180 Fmin=1.599944 | rew=-0.298805 | replay=388,102 | alpha=0.243647
 2025-11-23 23:19:37,223 - INFO - [EP 4][STEP 501] Natom=102 | Favg=56.689758 Fmax=1691.942871 Fmin=0.972690 | rew=0.401231 | replay=388,204 | alpha=0.243575
+2025-11-23 23:21:10,015 - INFO - [MACS-MOF][Multi-ENV] Start training EPOCHS=200, STEPS=1000, SWITCH_N=1000
+2025-11-23 23:21:10,015 - INFO - 
+================================================================================
+2025-11-23 23:21:10,015 - INFO - [EP 0] START
+2025-11-23 23:21:10,776 - INFO - [EP 0] [SWITCH] step=0 new CIF=mofs/train_pool_valid/qmof-a7aff20.cif
+2025-11-23 23:21:11,261 - INFO - [EP 0][STEP 0] Natom=86 | Favg=18.634701 Fmax=181.306305 Fmin=0.792711 | rew=-2.806639 | replay=86 | alpha=1.000000
+2025-11-23 23:21:12,046 - INFO - [EP 0][STEP 1] Natom=86 | Favg=20.856901 Fmax=184.984467 Fmin=0.342411 | rew=-0.234960 | replay=172 | alpha=1.000000
+2025-11-23 23:21:12,865 - INFO - [EP 0][STEP 2] Natom=86 | Favg=47.009396 Fmax=535.015198 Fmin=0.901602 | rew=-0.615026 | replay=258 | alpha=0.999700
