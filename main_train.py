@@ -1,5 +1,6 @@
 ##############################
-# train_mof.py  (ULTRA LOG + ROTATING LOG + CHECKPOINT + PER-STEP LOG)
+# train_mof_multi_env.py  
+# Multi-ENV + Short Episode + Low Perturb + Full Logging
 ##############################
 
 import os
@@ -51,7 +52,6 @@ def save_checkpoint(ep, agent, tag="auto"):
     }
     p = f"checkpoints/ckpt_ep{ep:04d}_{tag}.pt"
     torch.save(ckpt, p)
-
     logger.info(f"[CHECKPOINT] saved => {p}")
 
 
@@ -59,7 +59,6 @@ def save_checkpoint(ep, agent, tag="auto"):
 # pool DIR
 ############################################################
 POOL_DIR = "mofs/train_pool_valid"
-
 
 def sample_cif():
     cifs = [
@@ -71,9 +70,10 @@ def sample_cif():
 
 
 ############################################################
-# perturb
+# LOW PERTURB
 ############################################################
-def perturb(a, sigma=0.05):
+def perturb(a, sigma=0.01):
+    """Stability-preserving small perturb"""
     p = a.get_positions()
     p += np.random.normal(0, sigma, p.shape)
     a.set_positions(p)
@@ -92,10 +92,11 @@ calc = MACECalculator(
 
 
 ############################################################
-# config
+# CONFIG
 ############################################################
 EPOCHS      = 200
-MAX_STEPS   = 1000
+MAX_STEPS   = 1000                 # 🔥 shorter episode
+SWITCH_N    = 1000                  # 🔥 switch MOF every 50 steps
 FMAX_THRESH = 0.05
 
 BUFFER_SIZE = 3_000_000
@@ -103,7 +104,6 @@ BATCH_SIZE  = 256
 
 OBS_DIM     = 204
 ACT_DIM     = 3
-
 CHECKPOINT_INTERVAL = 5
 
 
@@ -125,43 +125,51 @@ agent = SACAgent(
 
 
 ############################################################
-# TRAIN
+# TRAIN LOOP (MULTI-ENV)
 ############################################################
-logger.info(f"[MACS-MOF] start training EPOCHS={EPOCHS}")
+logger.info(f"[MACS-MOF][Multi-ENV] Start training EPOCHS={EPOCHS}, STEPS={MAX_STEPS}, SWITCH_N={SWITCH_N}")
 
 global_start = time.time()
 
 
 for ep in range(EPOCHS):
 
-    cif = sample_cif()
-    atoms = read(cif)
-    atoms = perturb(atoms)
-    atoms.calc = calc
+    logger.info("\n" + "="*80)
+    logger.info(f"[EP {ep}] START")
 
-    logger.info("")
-    logger.info("="*80)
-    logger.info(f"[EP {ep}] CIF={cif}")
-
-    env = MOFEnv(
-        atoms_loader=lambda: atoms,
-        k_neighbors=12,
-        fmax_threshold=FMAX_THRESH,
-        max_steps=MAX_STEPS,
-    )
-
-    obs = env.reset()
+    obs = None
+    env = None
     ep_ret = 0.0
-    step_times = []
 
-
+    # ------------------------------------------------------
+    # MULTI-ENV LOOP
+    # ------------------------------------------------------
     for step in tqdm(range(MAX_STEPS), desc=f"[EP {ep}]", ncols=120):
 
-        t0 = time.time()
+        # 🔥 SWITCH STRUCTURE EVERY SWITCH_N STEPS
+        if (step % SWITCH_N == 0) or (obs is None):
+            cif = sample_cif()
+            atoms = read(cif)
+            atoms = perturb(atoms)        # small perturbation
+            atoms.calc = calc
 
+            env = MOFEnv(
+                atoms_loader=lambda: atoms,
+                k_neighbors=12,
+                fmax_threshold=FMAX_THRESH,
+                max_steps=MAX_STEPS,
+            )
+
+            obs = env.reset()
+
+            logger.info(f"[EP {ep}] [SWITCH] step={step} new CIF={cif}")
+
+
+        # ---- RL INTERACTION ----
         act = agent.act(obs)
         next_obs, rew, done = env.step(act)
 
+        # Store per-atom transitions
         for i in range(env.N):
             replay.store(obs[i], act[i], rew[i], next_obs[i], done)
 
@@ -169,28 +177,23 @@ for ep in range(EPOCHS):
             agent.update()
 
         obs = next_obs
-        ep_ret += np.mean(rew)
+        ep_ret += float(np.mean(rew))
 
-        f = np.linalg.norm(env.forces,axis=1)
+        # Force stats
+        f = np.linalg.norm(env.forces, axis=1)
         f_avg = float(np.mean(f))
         f_max = float(np.max(f))
         f_min = float(np.min(f))
 
-        step_times.append( (time.time()-t0)*1000 )
-
-
-        ###########################
-        # PER-STEP LOG 復元!
-        ###########################
+        # Per-step log
         logger.info(
             f"[EP {ep}][STEP {step}] "
             f"Natom={env.N} | "
             f"Favg={f_avg:.6f} Fmax={f_max:.6f} Fmin={f_min:.6f} | "
-            f"rew={np.mean(rew):.6f} | "
+            f"rew={float(np.mean(rew)):.6f} | "
             f"replay={len(replay):,} | "
             f"alpha={float(agent.alpha):.6f}"
         )
-
 
         if done:
             break
@@ -199,20 +202,17 @@ for ep in range(EPOCHS):
     logger.info(f"[EP {ep}] return={ep_ret:.6f}")
     logger.info(f"[EP {ep}] replay={len(replay):,}")
 
-
-    # periodic checkpoint
-    if ep % CHECKPOINT_INTERVAL == 0 and ep>0:
+    if ep % CHECKPOINT_INTERVAL == 0 and ep > 0:
         save_checkpoint(ep, agent, tag="interval")
 
 
-
-####################
+# ----------------------------
 # final checkpoint
-####################
+# ----------------------------
 save_checkpoint(EPOCHS, agent, tag="final")
-
 
 logger.info("[TRAIN DONE]")
 logger.info(f"wallclock={(time.time()-global_start)/3600:.3f} hr")
 
 print("== training finished ==")
+
