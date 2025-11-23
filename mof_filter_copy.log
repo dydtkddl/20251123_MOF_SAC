@@ -1,0 +1,10 @@
+2025-11-23 18:28:22,958 - INFO - ===== MOF Filtering & Copy Engine Started =====
+2025-11-23 18:28:22,958 - INFO - CSV: relaxed.atom_counts.csv
+2025-11-23 18:28:22,958 - INFO - Atom range: 60 ~ 120
+2025-11-23 18:28:22,958 - INFO - Source CIF dir: /home/yongsang/PSID_SIMULATION_TOOLS/RASPA/share/raspa/structures/cif/QMOF/qmof_database/relaxed_structures/
+2025-11-23 18:28:22,958 - INFO - Target CIF dir: mofs/train_pool/
+2025-11-23 18:28:22,967 - INFO - Loaded CSV with 20372 entries
+2025-11-23 18:28:22,967 - INFO - Filtered MOFs: 10354
+2025-11-23 18:28:24,018 - INFO - Saved filtered list to filtered_mofs.csv
+2025-11-23 18:28:24,018 - INFO - Copied 10354 CIF files
+2025-11-23 18:28:24,018 - INFO - Missing 0 CIF files
