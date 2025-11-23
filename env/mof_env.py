@@ -205,15 +205,33 @@ class MOFEnv:
             d0 = self.bond_d0[idx]
             d = np.linalg.norm(pos[a] - pos[b])
 
+            # 비율 계산
+            ratio = d / d0 if d0 > 1e-12 else 999
+
+            print("="*80)
+            print(f"[BOND CHECK #{idx}]")
+            print(f"  atoms: ({a}, {b})  species=({self.atoms[a].symbol}, {self.atoms[b].symbol})")
+            print(f"  d0 (initial bond length): {d0:.4f} Å")
+            print(f"  d (current bond length):  {d:.4f} Å")
+            print(f"  ratio (d/d0):             {ratio:.4f}")
+            print(f"  break threshold:          {self.bond_break_ratio:.2f} × d0  → {self.bond_break_ratio * d0:.4f}")
+            print(f"  compress threshold:       0.6 × d0 → {0.6 * d0:.4f}")
+
             # stretch
             if d > self.bond_break_ratio * d0:
+                print("  >>> BOND STRETCH BREAK DETECTED!  (penalty applied)")
                 reward -= self.bond_penalty
                 broken = True
 
-            # compression (optional)
-            if d < 0.6 * d0:
+            # compress
+            elif d < 0.6 * d0:
+                print("  >>> BOND COMPRESS BREAK DETECTED! (penalty applied)")
                 reward -= self.bond_penalty
                 broken = True
+            else:
+                print("  bond OK")
+
+            print("="*80 + "\n")
 
         if broken:
             done = True
