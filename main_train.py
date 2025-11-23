@@ -1,11 +1,12 @@
 ##############################
-# train_mof.py (ENHANCED LOGGING)
+# train_mof.py  (ULTRA LOG + ROTATING LOG)
 ##############################
 
 import os
 import time
 import numpy as np
 import logging
+from logging.handlers import RotatingFileHandler
 from tqdm import tqdm
 
 from ase.io import read
@@ -16,20 +17,26 @@ from sac.agent import SACAgent
 from utils.replay_buffer import ReplayBuffer
 
 
-##############################
-# Logging config
-##############################
-logging.basicConfig(
-    filename="train.log",
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s"
+############################################################
+# ROTATING LOGGING (10 MB each, keep 10 files)
+############################################################
+log_handler = RotatingFileHandler(
+    "train.log",
+    maxBytes=10_000_000,
+    backupCount=10,
 )
+log_handler.setFormatter(logging.Formatter(
+    "%(asctime)s - %(levelname)s - %(message)s"
+))
+
 logger = logging.getLogger("train")
+logger.setLevel(logging.INFO)
+logger.addHandler(log_handler)
 
 
-##############################
-# Pool
-##############################
+############################################################
+# pool DIR
+############################################################
 POOL_DIR = "mofs/train_pool_valid"
 
 
@@ -39,36 +46,33 @@ def sample_cif():
         for f in os.listdir(POOL_DIR)
         if f.endswith(".cif")
     ]
-
-    assert len(cifs) > 0
     return np.random.choice(cifs)
 
 
-##############################
+############################################################
 # perturb
-##############################
-def perturb(atoms, sigma=0.05):
-    pos = atoms.get_positions()
-    pos += np.random.normal(0, sigma, pos.shape)
-    atoms.set_positions(pos)
-    return atoms
+############################################################
+def perturb(a, sigma=0.05):
+    p = a.get_positions()
+    p += np.random.normal(0, sigma, p.shape)
+    a.set_positions(p)
+    return a
 
 
-##############################
+############################################################
 # MACE surrogate
-##############################
+############################################################
 calc = MACECalculator(
     model_paths=["mofs_v2.model"],
     head="pbe_d3",
     device="cuda",
-    default_dtype="float64"
+    default_dtype="float32"
 )
 
 
-##############################
+############################################################
 # config
-##############################
-
+############################################################
 EPOCHS      = 200
 MAX_STEPS   = 1000
 FMAX_THRESH = 0.05
@@ -80,42 +84,43 @@ OBS_DIM     = 204
 ACT_DIM     = 3
 
 
-##############################
-# init replay + agent
-##############################
-replay = ReplayBuffer(
-    obs_dim=OBS_DIM,
-    act_dim=ACT_DIM,
-    max_size=BUFFER_SIZE,
-)
+############################################################
+# replay + agent
+############################################################
+replay = ReplayBuffer(obs_dim=OBS_DIM, act_dim=ACT_DIM, max_size=BUFFER_SIZE)
 
 agent = SACAgent(
     obs_dim=OBS_DIM,
     act_dim=ACT_DIM,
     replay_buffer=replay,
+    device="cuda",
     lr=3e-4,
     gamma=0.995,
     tau=5e-3,
     batch_size=BATCH_SIZE,
-    device="cuda"
 )
 
 
-##############################
-# Training
-##############################
-logger.info(f"[MACS-MOF] start epochs={EPOCHS}")
+
+############################################################
+# TRAIN
+############################################################
+logger.info(f"[MACS-MOF] start training: epochs={EPOCHS}")
 
 global_start = time.time()
+
+
 
 for ep in range(EPOCHS):
 
     cif = sample_cif()
-    t0 = time.time()
-    print(cif)
     atoms = read(cif)
-    atoms = perturb(atoms, sigma=0.05)
+    atoms = perturb(atoms)
     atoms.calc = calc
+
+    logger.info("")
+    logger.info("=" * 80)
+    logger.info(f"[EP {ep}] CIF={cif}")
 
     env = MOFEnv(
         atoms_loader=lambda: atoms,
@@ -126,61 +131,62 @@ for ep in range(EPOCHS):
 
     obs = env.reset()
     ep_ret = 0.0
-
-    logger.info("")
-    logger.info(f"================ EP {ep} ================")
-    logger.info(f"CIF sample: {cif}")
-    logger.info(f"N atoms: {env.N}")
-
     step_times = []
 
-    for step in tqdm(range(MAX_STEPS), desc=f"[EP {ep}]"):
 
-        step_start = time.time()
+    for step in tqdm(range(MAX_STEPS), desc=f"[EP {ep}]", ncols=120):
+
+        step_t0 = time.time()
 
         act = agent.act(obs)
-
         next_obs, rew, done = env.step(act)
 
-        # build replay
+        # buffer push
         for i in range(env.N):
             replay.store(obs[i], act[i], rew[i], next_obs[i], done)
 
-        # RL update
         if len(replay) > agent.batch_size:
             agent.update()
 
         obs = next_obs
         ep_ret += np.mean(rew)
 
-        dt = (time.time() - step_start) * 1000
-        step_times.append(float(dt))
+        force = np.linalg.norm(env.forces,axis=1)
+        f_avg = float(np.mean(force))
+        f_max = float(np.max(force))
+        f_min = float(np.min(force))
+
+        step_times.append( (time.time()-step_t0)*1000 )
+
+
+        #######################################################
+        # PER-STEP LOG
+        #######################################################
+        logger.info(
+            f"[EP {ep}][STEP {step}] "
+            f"Natom={env.N} | "
+            f"Favg={f_avg:.6f} Fmax={f_max:.6f} Fmin={f_min:.6f} | "
+            f"rew_mean={np.mean(rew):.6f} | "
+            f"replay={len(replay):,} | "
+            f"alpha={float(agent.alpha):.6f}"
+        )
 
         if done:
-            if np.mean(np.linalg.norm(env.forces,axis=1)) < FMAX_THRESH:
-                termination = "EOS: converged"
-            else:
-                termination = "EOS: max step"
             break
-    else:
-        termination = "EOS: forced stop"
 
 
-    ########################
-    # EP Logging
-    ########################
 
-    mean_step_t = np.mean(step_times)
-    max_step_t = np.max(step_times)
+    ep_dur = time.time() - global_start
+    mean_step = np.mean(step_times)
 
-    logger.info(f"[EP {ep}] return = {ep_ret:.6f}")
-    logger.info(f"[EP {ep}] replay size = {len(replay):,}")
-    logger.info(f"[EP {ep}] avg reward = {ep_ret / (step+1):.6f}")
-    logger.info(f"[EP {ep}] mean step ms = {mean_step_t:.3f}")
-    logger.info(f"[EP {ep}] max  step ms = {max_step_t:.3f}")
-    logger.info(f"[EP {ep}] termination = {termination}")
+    logger.info(f"[EP {ep}] return={ep_ret:.6f}")
+    logger.info(f"[EP {ep}] mean step time={mean_step:.2f} ms")
+    logger.info(f"[EP {ep}] total replay={len(replay):,}")
+    logger.info(f"[EP {ep}] episode duration={ep_dur/60:.2f} min")
 
 
-logger.info("training completed.")
-logger.info(f"total walltime = {(time.time()-global_start)/3600:.3f} hr")
+
+logger.info("[TRAIN DONE]")
+logger.info(f"wallclock={(time.time()-global_start)/3600:.3f} hr")
+
 print("== training finished ==")
