@@ -166,84 +166,108 @@ class MOFEnv:
             obs_list.append(np.concatenate(block))
 
         return np.array(obs_list, dtype=np.float32)
+############################################################
+def step(self, action):
 
+    self.step_count += 1
 
-    ############################################################
-    def step(self, action):
+    # displacement scale
+    gnorm = np.linalg.norm(self.forces, axis=1)
+    gnorm = np.where(gnorm > 1e-12, gnorm, 1e-12)
+    c = np.minimum(gnorm, self.cmax).reshape(-1, 1)
 
-        self.step_count += 1
+    # displacement applied this step
+    disp = c * action
+    self.atoms.positions += disp
 
-        # displacement scale
-        gnorm = np.linalg.norm(self.forces, axis=1)
-        gnorm = np.where(gnorm > 1e-12, gnorm, 1e-12)
-        c = np.minimum(gnorm, self.cmax).reshape(-1, 1)
+    # compute new forces
+    new_forces = self.atoms.get_forces()
 
-        disp = c * action
-        self.atoms.positions += disp
+    old_norm = np.linalg.norm(self.forces, axis=1)
+    new_norm = np.linalg.norm(new_forces, axis=1)
 
-        # compute new forces
-        new_forces = self.atoms.get_forces()
+    old_norm = np.where(old_norm > 1e-12, old_norm, 1e-12)
+    new_norm = np.where(new_norm > 1e-12, new_norm, 1e-12)
 
-        old_norm = np.linalg.norm(self.forces, axis=1)
-        new_norm = np.linalg.norm(new_forces, axis=1)
+    reward = np.log(old_norm) - np.log(new_norm)
 
-        old_norm = np.where(old_norm > 1e-12, old_norm, 1e-12)
-        new_norm = np.where(new_norm > 1e-12, new_norm, 1e-12)
+    done = False
 
-        reward = np.log(old_norm) - np.log(new_norm)
+    # =====================================
+    # 🔥 EXTREME DEBUG: full per-bond info
+    # =====================================
+    pos = self.atoms.positions
+    broken = False
 
-        done = False
+    for idx, (a, b) in enumerate(self.bond_pairs):
 
-        # =====================================
-        # 🔥 bond 유지 체크 — 순서 100% 동일하게 비교
-        # =====================================
-        pos = self.atoms.positions
-        broken = False
+        d0 = self.bond_d0[idx]
+        d = np.linalg.norm(pos[a] - pos[b])
+        ratio = d / d0 if d0 > 1e-12 else 999
 
-        for idx, (a, b) in enumerate(self.bond_pairs):
+        # NEW: force magnitude per-atom
+        Fa = np.linalg.norm(self.forces[a])
+        Fb = np.linalg.norm(self.forces[b])
 
-            d0 = self.bond_d0[idx]
-            d = np.linalg.norm(pos[a] - pos[b])
+        # NEW: displacement magnitude per-atom
+        da = np.linalg.norm(disp[a])
+        db = np.linalg.norm(disp[b])
 
-            # 비율 계산
-            ratio = d / d0 if d0 > 1e-12 else 999
+        # NEW: new force magnitude after step
+        Fna = np.linalg.norm(new_forces[a])
+        Fnb = np.linalg.norm(new_forces[b])
 
-            print("="*80)
-            print(f"[BOND CHECK #{idx}]")
-            print(f"  atoms: ({a}, {b})  species=({self.atoms[a].symbol}, {self.atoms[b].symbol})")
-            print(f"  d0 (initial bond length): {d0:.4f} Å")
-            print(f"  d (current bond length):  {d:.4f} Å")
-            print(f"  ratio (d/d0):             {ratio:.4f}")
-            print(f"  break threshold:          {self.bond_break_ratio:.2f} × d0  → {self.bond_break_ratio * d0:.4f}")
-            print(f"  compress threshold:       0.6 × d0 → {0.6 * d0:.4f}")
+        print("\n" + "="*80)
+        print(f"[BOND CHECK #{idx}] atoms ({a},{b}) [{self.atoms[a].symbol}, {self.atoms[b].symbol}]")
+        print("-"*80)
 
-            # stretch
-            if d > self.bond_break_ratio * d0:
-                print("  >>> BOND STRETCH BREAK DETECTED!  (penalty applied)")
-                reward -= self.bond_penalty
-                broken = True
+        print(f"Initial bond length d0:        {d0:.6f} Å")
+        print(f"Current bond length d:         {d:.6f} Å")
+        print(f"Bond ratio (d/d0):             {ratio:.6f}")
+        print(f"Stretch threshold:             {self.bond_break_ratio:.2f} × d0 = {self.bond_break_ratio*d0:.6f}")
+        print(f"Compress threshold:            0.60 × d0 = {0.6*d0:.6f}")
+        print("")
 
-            # compress
-            elif d < 0.6 * d0:
-                print("  >>> BOND COMPRESS BREAK DETECTED! (penalty applied)")
-                reward -= self.bond_penalty
-                broken = True
-            else:
-                print("  bond OK")
+        print(f"Force  |F[a]| pre-step:        {Fa:.6f}   (atom {a})")
+        print(f"Force  |F[b]| pre-step:        {Fb:.6f}   (atom {b})")
+        print(f"Force  |F[a]| post-step:       {Fna:.6f}  (new)")
+        print(f"Force  |F[b]| post-step:       {Fnb:.6f}  (new)")
+        print("")
 
-            print("="*80 + "\n")
+        print(f"Disp   |disp[a]| this step:    {da:.6f} Å")
+        print(f"Disp   |disp[b]| this step:    {db:.6f} Å")
+        print("")
 
-        if broken:
-            done = True
+        # -------------------------------
+        # break/stretch/compress checks
+        # -------------------------------
+        if d > self.bond_break_ratio * d0:
+            print(">>> BOND STRETCH BREAK DETECTED! (penalty applied)")
+            reward -= self.bond_penalty
+            broken = True
 
-        if np.mean(new_norm) < self.fmax_threshold:
-            done = True
+        elif d < 0.6 * d0:
+            print(">>> BOND COMPRESS BREAK DETECTED! (penalty applied)")
+            reward -= self.bond_penalty
+            broken = True
+        else:
+            print("Bond OK")
 
-        if self.step_count >= self.max_steps:
-            done = True
+        print("="*80 + "\n")
 
-        self.prev_disp = disp.copy()
-        self.prev_forces = self.forces.copy()
-        self.forces = new_forces.copy()
+    if broken:
+        done = True
 
-        return self._obs(), reward, done
+    # termination by force threshold
+    if np.mean(new_norm) < self.fmax_threshold:
+        done = True
+
+    if self.step_count >= self.max_steps:
+        done = True
+
+    # update histories
+    self.prev_disp = disp.copy()
+    self.prev_forces = self.forces.copy()
+    self.forces = new_forces.copy()
+
+    return self._obs(), reward, done
