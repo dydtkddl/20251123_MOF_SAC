@@ -5,6 +5,7 @@ from ase.geometry import get_distances
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from ase.geometry import find_mic
 
 
 class MOFEnv:
@@ -203,7 +204,6 @@ class MOFEnv:
 
     # ============================================================
     # Relative vector (FIXED: PBC-aware)
-    from ase.geometry import find_mic
 
     def _rel_vec(self, i, j):
         # raw displacement
