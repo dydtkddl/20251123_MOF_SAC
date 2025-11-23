@@ -117,6 +117,13 @@ for ep in range(EPOCHS):
 
     atoms = read(cif)
 
+    # get allowed Z
+    try:
+        allowed = set(calc.model.atomic_numbers)
+    except:
+        from mace.tools.z_table import z_table
+        allowed = set(z_table.zs)
+
     zs = atoms.get_atomic_numbers()
     if any(z not in allowed for z in zs):
         logger.warning(f"[SKIP] unsupported element in CIF: {cif}")
