@@ -38,6 +38,13 @@ class Actor(nn.Module):
 
     def forward(self, obs):
 
+        # **ADD THIS BLOCK**
+        if not torch.is_floating_point(obs):
+            obs = obs.float()
+        elif obs.dtype != torch.float32:
+            obs = obs.float()
+        # -------------------
+
         x = F.relu(self.fc1(obs))
         x = F.relu(self.fc2(x))
 
