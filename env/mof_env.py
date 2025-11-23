@@ -412,10 +412,10 @@ class MOFEnv:
 
         # Rewards
         r_f = np.log(old_norm) - np.log(new_norm)
-        E_new = self.atoms.get_potential_energy()
-        r_e = (self.E_prev - E_new)
-        reward = self.w_f * r_f + self.w_e * r_e
-        self.E_prev = E_new
+        #E_new = self.atoms.get_potential_energy()
+        #r_e = (self.E_prev - E_new)
+        reward = r_f # self.w_f * r_f# + self.w_e * r_e
+       # self.E_prev = E_new
 
         # Soft bond penalties
         cell = self.atoms.cell
