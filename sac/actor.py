@@ -67,5 +67,5 @@ class Actor(nn.Module):
         # log prob correction term
         log_prob = dist.log_prob(z) - torch.log(1 - action.pow(2) + 1e-6)
         log_prob = torch.sum(log_prob, dim=-1, keepdim=True)
-        print("action:", action)
+        # print("action:", action)
         return action, log_prob, mu, std

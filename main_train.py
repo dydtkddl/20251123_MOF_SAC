@@ -1,6 +1,6 @@
 ##############################
 # train_mof_multi_env.py  
-# Multi-ENV + Short Episode + Low Perturb + Full Logging
+# Multi-ENV + Short Episode + Low Perturb + Full Logging + XYZ trajectory dump
 ##############################
 
 import os
@@ -73,7 +73,6 @@ def sample_cif():
 # LOW PERTURB
 ############################################################
 def perturb(a, sigma=0.01):
-    """Stability-preserving small perturb"""
     p = a.get_positions()
     p += np.random.normal(0, sigma, p.shape)
     a.set_positions(p)
@@ -95,8 +94,8 @@ calc = MACECalculator(
 # CONFIG
 ############################################################
 EPOCHS      = 200
-MAX_STEPS   = 1000                 # 🔥 shorter episode
-SWITCH_N    = 1000                  # 🔥 switch MOF every 50 steps
+MAX_STEPS   = 1000
+SWITCH_N    = 1000
 FMAX_THRESH = 0.05
 
 BUFFER_SIZE = 3_000_000
@@ -141,16 +140,31 @@ for ep in range(EPOCHS):
     env = None
     ep_ret = 0.0
 
+    # ------------------------------
+    # 🔥 EPISODE SNAPSHOT FOLDER
+    # ------------------------------
+    snap_dir = f"snapshots/EP{ep:04d}"
+    os.makedirs(snap_dir, exist_ok=True)
+
+    traj_path = os.path.join(snap_dir, "traj.xyz")
+    energy_path = os.path.join(snap_dir, "energies.txt")
+
+    if os.path.exists(traj_path):
+        os.remove(traj_path)
+
+    if os.path.exists(energy_path):
+        os.remove(energy_path)
+
     # ------------------------------------------------------
     # MULTI-ENV LOOP
     # ------------------------------------------------------
     for step in tqdm(range(MAX_STEPS), desc=f"[EP {ep}]", ncols=120):
 
-        # 🔥 SWITCH STRUCTURE EVERY SWITCH_N STEPS
+        # 🔥 STRUCTURE SWITCH
         if (step % SWITCH_N == 0) or (obs is None):
             cif = sample_cif()
             atoms = read(cif)
-            atoms = perturb(atoms)        # small perturbation
+            atoms = perturb(atoms)
             atoms.calc = calc
 
             env = MOFEnv(
@@ -164,12 +178,11 @@ for ep in range(EPOCHS):
 
             logger.info(f"[EP {ep}] [SWITCH] step={step} new CIF={cif}")
 
-
         # ---- RL INTERACTION ----
         act = agent.act(obs)
         next_obs, rew, done = env.step(act)
 
-        # Store per-atom transitions
+        # Store transitions
         for i in range(env.N):
             replay.store(obs[i], act[i], rew[i], next_obs[i], done)
 
@@ -178,6 +191,20 @@ for ep in range(EPOCHS):
 
         obs = next_obs
         ep_ret += float(np.mean(rew))
+
+        # ------------------------------------------------------
+        # 🔥 SAVE XYZ FRAME (append)
+        # ------------------------------------------------------
+        env.atoms.write(traj_path, append=True)
+
+        # ------------------------------------------------------
+        # 🔥 SAVE ENERGY
+        # ------------------------------------------------------
+        E_total = env.atoms.get_potential_energy()
+        E_pa = E_total / env.N
+
+        with open(energy_path, "a") as f:
+            f.write(f"{step} {E_total:.8f} {E_pa:.8f}\n")
 
         # Force stats
         f = np.linalg.norm(env.forces, axis=1)
@@ -215,4 +242,3 @@ logger.info("[TRAIN DONE]")
 logger.info(f"wallclock={(time.time()-global_start)/3600:.3f} hr")
 
 print("== training finished ==")
-
