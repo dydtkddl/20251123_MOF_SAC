@@ -25,7 +25,7 @@ class MOFEnv:
         cmax=0.4,
         max_steps=300,
         fmax_threshold=0.05,
-        bond_break_ratio=1.3,    # 🔥 bond break threshold
+        bond_break_ratio=1.8,    # 🔥 bond break threshold
         bond_penalty=100.0       # 🔥 reward penalty
     ):
         self.atoms_loader = atoms_loader
@@ -209,7 +209,9 @@ class MOFEnv:
             if d > self.bond_break_ratio * d0:
                 reward -= self.bond_penalty
                 broken = True
-
+            if d < 0.6 * d0:
+                reward -= self.bond_penalty
+                broken = True
         if broken:
             done = True
 
