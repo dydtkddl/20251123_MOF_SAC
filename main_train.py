@@ -1,5 +1,5 @@
 ##############################
-# train_mof.py  (ULTRA LOG + ROTATING LOG + CHECKPOINT)
+# train_mof.py  (ULTRA LOG + ROTATING LOG + CHECKPOINT + PER-STEP LOG)
 ##############################
 
 import os
@@ -49,11 +49,10 @@ def save_checkpoint(ep, agent, tag="auto"):
         "v_tgt": agent.v_tgt.state_dict(),
         "log_alpha": float(agent.log_alpha.detach().cpu()),
     }
+    p = f"checkpoints/ckpt_ep{ep:04d}_{tag}.pt"
+    torch.save(ckpt, p)
 
-    path = f"checkpoints/ckpt_ep{ep:04d}_{tag}.pt"
-    torch.save(ckpt, path)
-
-    logger.info(f"[CHECKPOINT SAVED] => {path}")
+    logger.info(f"[CHECKPOINT] saved => {p}")
 
 
 ############################################################
@@ -105,7 +104,7 @@ BATCH_SIZE  = 256
 OBS_DIM     = 204
 ACT_DIM     = 3
 
-SAVE_INTERVAL = 5   # save every 5 epochs
+CHECKPOINT_INTERVAL = 5
 
 
 ############################################################
@@ -125,14 +124,12 @@ agent = SACAgent(
 )
 
 
-
 ############################################################
 # TRAIN
 ############################################################
-logger.info(f"[MACS-MOF] start training: epochs={EPOCHS}")
+logger.info(f"[MACS-MOF] start training EPOCHS={EPOCHS}")
 
 global_start = time.time()
-
 
 
 for ep in range(EPOCHS):
@@ -143,7 +140,7 @@ for ep in range(EPOCHS):
     atoms.calc = calc
 
     logger.info("")
-    logger.info("=" * 80)
+    logger.info("="*80)
     logger.info(f"[EP {ep}] CIF={cif}")
 
     env = MOFEnv(
@@ -160,7 +157,7 @@ for ep in range(EPOCHS):
 
     for step in tqdm(range(MAX_STEPS), desc=f"[EP {ep}]", ncols=120):
 
-        step_t0 = time.time()
+        t0 = time.time()
 
         act = agent.act(obs)
         next_obs, rew, done = env.step(act)
@@ -174,9 +171,26 @@ for ep in range(EPOCHS):
         obs = next_obs
         ep_ret += np.mean(rew)
 
-        force = np.linalg.norm(env.forces,axis=1)
+        f = np.linalg.norm(env.forces,axis=1)
+        f_avg = float(np.mean(f))
+        f_max = float(np.max(f))
+        f_min = float(np.min(f))
 
-        step_times.append((time.time()-step_t0)*1000)
+        step_times.append( (time.time()-t0)*1000 )
+
+
+        ###########################
+        # PER-STEP LOG 復元!
+        ###########################
+        logger.info(
+            f"[EP {ep}][STEP {step}] "
+            f"Natom={env.N} | "
+            f"Favg={f_avg:.6f} Fmax={f_max:.6f} Fmin={f_min:.6f} | "
+            f"rew={np.mean(rew):.6f} | "
+            f"replay={len(replay):,} | "
+            f"alpha={float(agent.alpha):.6f}"
+        )
+
 
         if done:
             break
@@ -185,15 +199,16 @@ for ep in range(EPOCHS):
     logger.info(f"[EP {ep}] return={ep_ret:.6f}")
     logger.info(f"[EP {ep}] replay={len(replay):,}")
 
+
     # periodic checkpoint
-    if ep % SAVE_INTERVAL == 0 and ep > 0:
+    if ep % CHECKPOINT_INTERVAL == 0 and ep>0:
         save_checkpoint(ep, agent, tag="interval")
 
 
 
-############################################################
-# FINAL SAVE
-############################################################
+####################
+# final checkpoint
+####################
 save_checkpoint(EPOCHS, agent, tag="final")
 
 
