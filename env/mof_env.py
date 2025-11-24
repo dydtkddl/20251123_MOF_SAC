@@ -12,16 +12,17 @@ class MOFEnv:
         k_neighbors=12,
         cmax=0.4,
         max_steps=300,
-        fmax_threshold=0.05,
-        bond_break_ratio=2.4,
+
+        # === Stability-tuned parameters ===
+        fmax_threshold=0.12,         # ★ 0.05 → 0.12 (MACE noise 고려)
+        bond_break_ratio=3.2,        # ★ 2.4 → 3.2 (허용 범위 확장)
         k_bond=3.0,
         max_penalty=10.0,
         debug_bond=False,
 
-        # === Updated options ===
-        reward_clip=10.0,            # reward bounded to [-10,+10]
-        base_disp=0.03,              # ★ increased displacement scale
-        anneal_rate=0.05,            # ★ stronger annealing
+        reward_clip=25.0,            # ★ 10 → 25 (reward 신호 확대)
+        base_disp=0.005,             # ★ 0.03 → 0.005 (불안정 움직임 제거)
+        anneal_rate=0.01,            # ★ 0.05 → 0.01 (과한 scaling 방지)
         noise_std=0.0,
     ):
         self.atoms_loader = atoms_loader
@@ -37,11 +38,11 @@ class MOFEnv:
         self.max_penalty = max_penalty
         self.debug_bond = debug_bond
 
-        # COM stabilization
-        self.com_threshold = 0.30
-        self.com_lambda = 20.0
+        # COM stabilization (relaxed)
+        self.com_threshold = 0.40     # ★ 0.30 → 0.40 (허용 범위 증가)
+        self.com_lambda = 5.0         # ★ 20.0 → 5.0 (과도 penalty 제거)
 
-        # === updated parameters ===
+        # Updated parameters
         self.reward_clip = reward_clip
         self.base_disp = base_disp
         self.anneal_rate = anneal_rate
@@ -271,8 +272,6 @@ class MOFEnv:
         return np.concatenate([core, roles, self.bond_types[idx]])
 
     # ============================================================
-    # OBS
-    # ============================================================
     def _obs(self):
         obs_list = []
 
@@ -366,19 +365,19 @@ class MOFEnv:
 
         # premature termination
         if delta_COM > self.com_threshold:
-            reward = reward * 0.2
+            reward *= 0.2
             reward = np.clip(reward, -self.reward_clip, self.reward_clip)
             return self._obs(), reward, True
 
         # ============================================================
         # 4) Bond penalties
         # ============================================================
-        for idx,(a,b) in enumerate(self.bond_pairs):
+        for idx, (a, b) in enumerate(self.bond_pairs):
 
-            rel = self._rel_vec(a,b)
+            rel = self._rel_vec(a, b)
             d = np.linalg.norm(rel)
             d0 = self.bond_d0[idx]
-            ratio = d/d0
+            ratio = d / d0
 
             stretch = max(0.0, ratio - self.bond_break_ratio)
             compress = max(0.0, 0.6 - ratio)
@@ -389,7 +388,7 @@ class MOFEnv:
             reward -= penalty
 
             if ratio > 6.0 or ratio < 0.25:
-                reward = reward * 0.2
+                reward *= 0.2
                 reward = np.clip(reward, -self.reward_clip, self.reward_clip)
                 return self._obs(), reward, True
 
@@ -403,9 +402,9 @@ class MOFEnv:
             done = True
 
         # ============================================================
-        # Reward scaling + clipping (★ 핵심)
+        # Reward scaling + clipping
         # ============================================================
-        reward = reward * 0.2
+        reward *= 0.2
         reward = np.clip(reward, -self.reward_clip, self.reward_clip)
 
         # ============================================================

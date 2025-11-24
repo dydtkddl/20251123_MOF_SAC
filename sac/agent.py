@@ -10,10 +10,11 @@ from .critic import CriticQ, CriticV
 class SACAgent:
     """
     Stable per-atom SAC agent for MACS-MOF RL with:
-        - target entropy = -1.0
-        - update frequency K=4
+        - target entropy = -2.0 (stronger exploration)
+        - update frequency K=8
         - EMA-smoothed critic target
         - advantage normalization
+        - alpha_min clamp to prevent collapse
         - FP32 enforced for MACE stability
     """
 
@@ -27,16 +28,16 @@ class SACAgent:
         tau=5e-3,
         batch_size=256,
         lr=3e-4,
-        update_every=4,           # update frequency
-        normalize_adv=True,       # advantage normalization
-        ema_beta=0.02             # ★ EMA smoothing factor (0.10 → 0.02)
+        update_every=8,           # ★ 4 → 8 (더 안정적)
+        normalize_adv=True,
+        ema_beta=0.02             # EMA smoothing
     ):
 
         self.replay = replay_buffer
         self.batch_size = batch_size
         self.update_every = update_every
         self.normalize_adv = normalize_adv
-        self.ema_beta = ema_beta   # ★ updated
+        self.ema_beta = ema_beta
 
         self.device = torch.device(device if torch.cuda.is_available() else "cpu")
         self.gamma = gamma
@@ -62,17 +63,20 @@ class SACAgent:
         self.q2_opt    = optim.Adam(self.q2.parameters(), lr=lr)
 
         # ---------------------------------------------------------
-        # ENTROPY (target = -1.0)
+        # ENTROPY (target = -2.0 ★ 변경됨)
         # ---------------------------------------------------------
-        self.target_entropy = -1.0
+        self.target_entropy = -2.0      # ★ stronger entropy → exploration 유지
         self.log_alpha = torch.zeros(1, requires_grad=True, device=self.device)
         self.alpha_opt = optim.Adam([self.log_alpha], lr=lr)
+
+        # α 최소값 (★ 신규)
+        self.alpha_min = 0.2            # ★ prevent deterministic collapse
 
         # ---------------------------------------------------------
         # Internal counters
         # ---------------------------------------------------------
         self.total_steps = 0
-        self.q_target_ema = None  # ★ EMA buffer
+        self.q_target_ema = None
 
 
     # ==============================================================    
@@ -109,7 +113,6 @@ class SACAgent:
         nobs = torch.as_tensor(batch["nobs"], dtype=torch.float32, device=self.device)
         done = torch.as_tensor(batch["done"], dtype=torch.float32, device=self.device).unsqueeze(1)
 
-
         # ===========================================================
         # 1) α update
         # ===========================================================
@@ -121,6 +124,9 @@ class SACAgent:
         alpha_loss.backward()
         self.alpha_opt.step()
 
+        # ★ Alpha clamp (prevent collapse)
+        with torch.no_grad():
+            self.log_alpha.data.clamp_(np.log(self.alpha_min), 10.0)
 
         # ===========================================================
         # 2) Q update (with EMA target)
@@ -129,7 +135,6 @@ class SACAgent:
             v_next = self.v_tgt(nobs)
             q_target_raw = rew + (1 - done) * self.gamma * v_next  
 
-            # ★ EMA TARGET SMOOTHING
             if self.q_target_ema is None:
                 self.q_target_ema = q_target_raw.clone()
 
@@ -139,7 +144,6 @@ class SACAgent:
             )
 
             q_target = self.q_target_ema
-
 
         q1_pred = self.q1(obs, act)
         q2_pred = self.q2(obs, act)
@@ -155,7 +159,6 @@ class SACAgent:
         q2_loss.backward()
         self.q2_opt.step()
 
-
         # ===========================================================
         # 3) V update
         # ===========================================================
@@ -168,7 +171,7 @@ class SACAgent:
             )
             v_tgt = q_new - self.alpha * logp
 
-            # ★ Advantage Normalization
+            # Advantage Normalization
             if self.normalize_adv:
                 v_tgt_mean = v_tgt.mean()
                 v_tgt_std  = v_tgt.std() + 1e-6
@@ -179,7 +182,6 @@ class SACAgent:
         self.v_opt.zero_grad()
         v_loss.backward()
         self.v_opt.step()
-
 
         # ===========================================================
         # 4) POLICY update
@@ -192,7 +194,6 @@ class SACAgent:
         self.actor_opt.zero_grad()
         policy_loss.backward()
         self.actor_opt.step()
-
 
         # ===========================================================
         # 5) Soft-update V_target
@@ -207,6 +208,7 @@ class SACAgent:
             "q2_loss": float(q2_loss),
             "v_loss": float(v_loss),
             "alpha_loss": float(alpha_loss),
+            "alpha": float(self.alpha.item()),
         }
 
 

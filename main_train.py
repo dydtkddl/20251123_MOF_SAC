@@ -89,13 +89,11 @@ BASE_STEPS   = 300
 FINAL_STEPS  = 1000
 HORIZON_SCH  = 500
 
-FMAX_THRESH  = 0.05
+FMAX_THRESH  = 0.12       # ★ 수정됨 (0.05 → 0.12)
 BUFFER_SIZE  = 200_000
 BATCH_SIZE   = 256
 
-# ★ Changed
-WARMUP = 20_000
-
+WARMUP = 20_000           # 동일 OK
 CHECKPOINT_INTERVAL = 5
 
 
@@ -171,7 +169,7 @@ for ep in range(EPOCHS):
         replay = ReplayBuffer(
             obs_dim=OBS_DIM,
             max_size=BUFFER_SIZE,
-            reward_weight=0.2,        # ★ priority relaxation
+            reward_weight=0.2,
             warmup=WARMUP,
         )
 
@@ -186,7 +184,7 @@ for ep in range(EPOCHS):
             batch_size=BATCH_SIZE,
             update_every=4,
             normalize_adv=True,
-            ema_beta=0.02,            # ★ stronger smoothing
+            ema_beta=0.02,
         )
         logger.info("[INIT] Agent + ReplayBuffer allocated.")
 
@@ -198,27 +196,19 @@ for ep in range(EPOCHS):
 
     for step in tqdm(range(max_steps), desc=f"[EP {ep}]", ncols=120):
 
-        ########################################
-        # ACTION (per-atom)
-        ########################################
+        # ACTION
         action = np.zeros((N_atom, 3), float)
         for i in range(N_atom):
             action[i] = agent.act(obs[i])
 
-        ########################################
         # ENV STEP
-        ########################################
         next_obs, reward, done = env.step(action)
 
-        ########################################
-        # ★ reward scaling + clipping
-        ########################################
+        # reward scaling + clipping
         scaled_reward = reward * 0.2
         clipped_reward = np.clip(scaled_reward, -10.0, 10.0)
 
-        ########################################
         # STORE PER-ATOM TRANSITION
-        ########################################
         for i in range(N_atom):
             replay.store(
                 obs[i],
@@ -228,15 +218,11 @@ for ep in range(EPOCHS):
                 done,
             )
 
-        ########################################
-        # UPDATE SAC (after WARM-UP)
-        ########################################
+        # UPDATE SAC
         if replay.ready():
             agent.update()
 
-        ########################################
         # SAVE TRAJECTORY
-        ########################################
         env.atoms.write(traj_path, append=True)
 
         Etot = env.atoms.get_potential_energy()
@@ -263,9 +249,7 @@ for ep in range(EPOCHS):
             logger.info(f"[EP {ep}] terminated early at step={step}")
             break
 
-    ##################################
     # EP END
-    ##################################
     logger.info(f"[EP {ep}] return={ep_ret:.6f}")
     logger.info(f"[EP {ep}] replay_size={len(replay):,}")
 
