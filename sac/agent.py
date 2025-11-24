@@ -10,12 +10,15 @@ from .critic import CriticQ, CriticV
 
 
 class SACAgent:
+    """
+    Stable per-atom SAC agent for MACS-MOF RL
+    """
 
     def __init__(
         self,
         obs_dim,
-        act_dim,
         replay_buffer,
+        act_dim=3,
         device="cuda",
         gamma=0.995,
         tau=5e-3,
@@ -26,53 +29,37 @@ class SACAgent:
         self.replay = replay_buffer
         self.batch_size = batch_size
 
-        self.device = torch.device(
-            device if torch.cuda.is_available() else "cpu"
-        )
-
+        self.device = torch.device(device if torch.cuda.is_available() else "cpu")
         self.gamma = gamma
         self.tau = tau
 
-        # -----------------
-        # models
-        # -----------------
-        self.actor = Actor(obs_dim, act_dim).to(self.device)
-        self.v     = CriticV(obs_dim).to(self.device)
-        self.v_tgt = CriticV(obs_dim).to(self.device)
-        self.q1    = CriticQ(obs_dim, act_dim).to(self.device)
-        self.q2    = CriticQ(obs_dim, act_dim).to(self.device)
+        # ---------------------------
+        # NETWORKS (FP32)
+        # ---------------------------
+        self.actor = Actor(obs_dim, act_dim).to(self.device).float()
+        self.v = CriticV(obs_dim).to(self.device).float()
+        self.v_tgt = CriticV(obs_dim).to(self.device).float()
+        self.q1 = CriticQ(obs_dim, act_dim).to(self.device).float()
+        self.q2 = CriticQ(obs_dim, act_dim).to(self.device).float()
 
         self.v_tgt.load_state_dict(self.v.state_dict())
 
-        # -----------------
-        # optimizers
-        # -----------------
+        # ---------------------------
+        # OPTIMIZERS
+        # ---------------------------
         self.actor_opt = optim.Adam(self.actor.parameters(), lr=lr)
-        self.v_opt     = optim.Adam(self.v.parameters(), lr=lr)
-        self.q1_opt    = optim.Adam(self.q1.parameters(), lr=lr)
-        self.q2_opt    = optim.Adam(self.q2.parameters(), lr=lr)
+        self.v_opt = optim.Adam(self.v.parameters(), lr=lr)
+        self.q1_opt = optim.Adam(self.q1.parameters(), lr=lr)
+        self.q2_opt = optim.Adam(self.q2.parameters(), lr=lr)
 
-        # -----------------
-        # entropy tuning
-        # -----------------
-        self.target_entropy = -act_dim
-        self.log_alpha = torch.zeros(
-            1, requires_grad=True, device=self.device
-        )
+        # ---------------------------
+        # ENTROPY (TARGET = -1)
+        # ---------------------------
+        self.target_entropy = -1.0
+        self.log_alpha = torch.zeros(1, requires_grad=True, device=self.device)
         self.alpha_opt = optim.Adam([self.log_alpha], lr=lr)
 
         self.total_steps = 0
-
-
-        ########################################################
-        # FORCE ALL NETWORK PARAMETERS TO FP32
-        ########################################################
-        self.actor.float()
-        self.v.float()
-       	self.v_tgt.float()
-        self.q1.float()
-        self.q2.float()
-
 
 
     @property
@@ -80,33 +67,32 @@ class SACAgent:
         return self.log_alpha.exp()
 
 
-
+    # -------------------------------------------------------------
+    # ACTION SELECTION
+    # -------------------------------------------------------------
     @torch.no_grad()
     def act(self, obs):
-
-        obs = torch.as_tensor(
-            obs, dtype=torch.float32, device=self.device
-        )
-
+        obs = torch.as_tensor(obs, dtype=torch.float32, device=self.device)
         a, _, _, _ = self.actor(obs)
         return a.cpu().numpy()
 
 
-
-    ############################################################
+    # -------------------------------------------------------------
+    # UPDATE SAC
+    # -------------------------------------------------------------
     def update(self):
 
         batch = self.replay.sample(self.batch_size)
 
-        # FP32 -- critical
         obs  = torch.as_tensor(batch["obs"],  dtype=torch.float32, device=self.device)
         act  = torch.as_tensor(batch["act"],  dtype=torch.float32, device=self.device)
         rew  = torch.as_tensor(batch["rew"],  dtype=torch.float32, device=self.device).unsqueeze(1)
         nobs = torch.as_tensor(batch["nobs"], dtype=torch.float32, device=self.device)
         done = torch.as_tensor(batch["done"], dtype=torch.float32, device=self.device).unsqueeze(1)
 
-
-        # α update
+        # ============================
+        # 1) α update
+        # ============================
         new_action, logp, _, _ = self.actor(obs)
         alpha_loss = -(self.log_alpha * (logp + self.target_entropy).detach()).mean()
 
@@ -114,17 +100,18 @@ class SACAgent:
         alpha_loss.backward()
         self.alpha_opt.step()
 
-
-        # Q update
+        # ============================
+        # 2) Q update
+        # ============================
         with torch.no_grad():
             v_next = self.v_tgt(nobs)
-            q_target = rew + (1 - done) * self.gamma * v_next
+            q_tgt = rew + (1 - done) * self.gamma * v_next
 
         q1_pred = self.q1(obs, act)
         q2_pred = self.q2(obs, act)
 
-        q1_loss = F.mse_loss(q1_pred, q_target)
-        q2_loss = F.mse_loss(q2_pred, q_target)
+        q1_loss = F.mse_loss(q1_pred, q_tgt)
+        q2_loss = F.mse_loss(q2_pred, q_tgt)
 
         self.q1_opt.zero_grad()
         q1_loss.backward()
@@ -134,22 +121,13 @@ class SACAgent:
         q2_loss.backward()
         self.q2_opt.step()
 
-
-        # V update
+        # ============================
+        # 3) V update
+        # ============================
         v_pred = self.v(obs)
         with torch.no_grad():
-            q_new = torch.min(
-                self.q1(obs, new_action),
-                self.q2(obs, new_action)
-            )
+            q_new = torch.min(self.q1(obs, new_action), self.q2(obs, new_action))
         v_tgt = q_new - self.alpha * logp
-
-        #########################################################
-        # 🔥 CRITICAL FIX — force fp32 here
-        #########################################################
-        v_pred = v_pred.float()
-        v_tgt  = v_tgt.float()
-        #########################################################
 
         v_loss = F.mse_loss(v_pred, v_tgt)
 
@@ -157,16 +135,13 @@ class SACAgent:
         v_loss.backward()
         self.v_opt.step()
 
-
-        # Policy update
+        # ============================
+        # 4) Policy update
+        # ============================
         if self.total_steps % 2 == 0:
 
             aa, lp, _, _ = self.actor(obs)
-
-            q_new2 = torch.min(
-                self.q1(obs, aa),
-                self.q2(obs, aa),
-            )
+            q_new2 = torch.min(self.q1(obs, aa), self.q2(obs, aa))
 
             policy_loss = (self.alpha * lp - q_new2).mean()
 
@@ -176,16 +151,6 @@ class SACAgent:
 
             self.soft_update()
 
-
         self.total_steps += 1
 
-
-
-    ############################################################
-    def soft_update(self):
-
-        with torch.no_grad():
-            for t, s in zip(self.v_tgt.parameters(), self.v.parameters()):
-                t.data.copy_(
-                    self.tau * s.data + (1 - self.tau) * t.data
-                )
+        # ============================
