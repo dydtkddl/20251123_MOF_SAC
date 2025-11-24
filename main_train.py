@@ -174,14 +174,16 @@ for ep in range(EPOCHS):
         ACT_GLOBAL_DIM = 3 * N_atom
 
         replay = ReplayBuffer(
-            obs_global_dim=OBS_GLOBAL_DIM,
-            act_global_dim=ACT_GLOBAL_DIM,
+            n_atoms=N_atom,
+            feat_dim=FEAT,
+            act_global_dim=ACT_GLOBAL_DIM,   # = 3*N_atom
             max_size=BUFFER_SIZE,
             n_step=1,
             gamma=0.995,
             alpha=0.6,
             beta=0.4
         )
+
 
         agent = SACAgent(
             obs_global_dim=OBS_GLOBAL_DIM,
