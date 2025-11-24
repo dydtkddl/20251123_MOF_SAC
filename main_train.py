@@ -176,10 +176,10 @@ for ep in range(EPOCHS):
     ###############################################################
     # Hybrid-MACS: DEBUG FEATURE LOGGING
     ###############################################################
-    logger.info(f"[EP {ep}] feature_dim(center)     = {env.feature_dim_center}")
-    logger.info(f"[EP {ep}] feature_dim(neighbor)  = {env.feature_dim_neighbor}")
-    logger.info(f"[EP {ep}] k_neighbors            = {env.k}")
-    logger.info(f"[EP {ep}] Final obs_dim          = {env.obs_dim_total}")
+    # logger.info(f"[EP {ep}] feature_dim(center)     = {env.feature_dim_center}")
+    # logger.info(f"[EP {ep}] feature_dim(neighbor)  = {env.feature_dim_neighbor}")
+    # logger.info(f"[EP {ep}] k_neighbors            = {env.k}")
+    # logger.info(f"[EP {ep}] Final obs_dim          = {env.obs_dim_total}")
 
     ###############################################################
     # obs_dim mismatch check (CIF-to-CIF consistency must hold)
