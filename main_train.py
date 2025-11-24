@@ -1,7 +1,8 @@
 ##############################################
 # train_mof_multi_env.py  
-# Per-Atom RL (MACS-style)
-# Stable SAC + Reward Scaling + Warm-up + EMA Smoothing
+# Per-Atom RL version (MACS-style)
+# Full Logging + XYZ Dump + Curriculum Horizon
+# Episode-Level Buffer + Bad Termination Discard
 ##############################################
 
 import os
@@ -89,11 +90,10 @@ BASE_STEPS   = 300
 FINAL_STEPS  = 1000
 HORIZON_SCH  = 500
 
-FMAX_THRESH  = 0.12       # ★ 수정됨 (0.05 → 0.12)
-BUFFER_SIZE  = 200_000
+FMAX_THRESH  = 0.05
+BUFFER_SIZE  = 5_000_000
 BATCH_SIZE   = 256
 
-WARMUP = 20_000           # 동일 OK
 CHECKPOINT_INTERVAL = 5
 
 
@@ -126,19 +126,19 @@ for ep in range(EPOCHS):
     logger.info(f"[EP {ep}] max_steps = {max_steps}")
 
     ##################################
-    # Snapshot folder
+    # Snapshot folders
     ##################################
     snap_dir = f"snapshots/EP{ep:04d}"
     os.makedirs(snap_dir, exist_ok=True)
 
     traj_path = os.path.join(snap_dir, "traj.xyz")
-    en_path   = os.path.join(snap_dir, "energies.txt")
+    en_path = os.path.join(snap_dir, "energies.txt")
 
     if os.path.exists(traj_path): os.remove(traj_path)
     if os.path.exists(en_path): os.remove(en_path)
 
     ##################################
-    # Load CIF / Init Env
+    # Load CIF and Init Env
     ##################################
     cif = sample_cif()
     atoms = read(cif)
@@ -158,19 +158,17 @@ for ep in range(EPOCHS):
     N_atom = env.N
     obs_dim = obs.shape[1]
 
+
     ##################################
-    # EP0 → Initialize Replay + Agent
+    # EP0: Initialize Replay + Agent
     ##################################
     if ep == 0:
         OBS_DIM = obs_dim
-
         logger.info(f"[INIT] OBS_DIM={OBS_DIM}, ACT_DIM=3 (per-atom)")
 
         replay = ReplayBuffer(
             obs_dim=OBS_DIM,
-            max_size=BUFFER_SIZE,
-            reward_weight=0.2,
-            warmup=WARMUP,
+            max_size=BUFFER_SIZE
         )
 
         agent = SACAgent(
@@ -182,52 +180,56 @@ for ep in range(EPOCHS):
             gamma=0.995,
             tau=5e-3,
             batch_size=BATCH_SIZE,
-            update_every=4,
-            normalize_adv=True,
-            ema_beta=0.02,
         )
-        logger.info("[INIT] Agent + ReplayBuffer allocated.")
+
+        logger.info("[INIT] Agent + ReplayBuffer allocated (per-atom).")
 
 
     ##################################
     # EPISODE
     ##################################
     ep_ret = 0.0
+    episode_buffer = []
+    done_reason = "none"
+
 
     for step in tqdm(range(max_steps), desc=f"[EP {ep}]", ncols=120):
 
-        # ACTION
-        action = np.zeros((N_atom, 3), float)
+        ########################
+        # ACTION (per-atom)
+        ########################
+        obs_tensor = obs
+        action_list = []
         for i in range(N_atom):
-            action[i] = agent.act(obs[i])
+            a = agent.act(obs_tensor[i])
+            action_list.append(a)
 
-        # ENV STEP
-        next_obs, reward, done = env.step(action)
+        action_arr = np.stack(action_list, axis=0)
 
-        # reward scaling + clipping
-        scaled_reward = reward * 0.2
-        clipped_reward = np.clip(scaled_reward, -10.0, 10.0)
+        ########################
+        # STEP ENV
+        ########################
+        next_obs, reward, done, done_reason = env.step(action_arr)
 
-        # STORE PER-ATOM TRANSITION
+        next_reward = reward.astype(np.float32)
+
+        # EPISODE BUFFER STORE
         for i in range(N_atom):
-            replay.store(
-                obs[i],
-                action[i],
-                clipped_reward[i],
-                next_obs[i],
+            episode_buffer.append((
+                obs[i].copy(),
+                action_arr[i].copy(),
+                next_reward[i],
+                next_obs[i].copy(),
                 done,
-            )
+            ))
 
-        # UPDATE SAC
-        if replay.ready():
-            agent.update()
-
-        # SAVE TRAJECTORY
+        ########################
+        # TRAJECTORY SAVE
+        ########################
         env.atoms.write(traj_path, append=True)
 
         Etot = env.atoms.get_potential_energy()
         E_pa = Etot / N_atom
-
         with open(en_path, "a") as f:
             f.write(f"{step} {Etot:.8f} {E_pa:.8f}\n")
 
@@ -237,21 +239,37 @@ for ep in range(EPOCHS):
             f"[EP {ep}][STEP {step}] "
             f"N={N_atom} | "
             f"Favg={np.mean(f_norm):.6f} Fmax={np.max(f_norm):.6f} "
-            f"rew_mean={float(np.mean(clipped_reward)):.6f} | "
-            f"replay={len(replay):,} | "
+            f"rew_mean={float(np.mean(next_reward)):.6f} | "
+            f"ep_buf={len(episode_buffer):,} | "
             f"alpha={float(agent.alpha):.5f}"
         )
 
-        ep_ret += float(np.mean(clipped_reward))
+        ep_ret += float(np.mean(next_reward))
         obs = next_obs
 
         if done:
-            logger.info(f"[EP {ep}] terminated early at step={step}")
+            logger.info(f"[EP {ep}] terminated early at step={step} reason={done_reason}")
             break
 
+
+    ##################################
     # EP END
+    ##################################
     logger.info(f"[EP {ep}] return={ep_ret:.6f}")
+
+    BAD_TERMINATIONS = ["com", "bond"]
+
+    if done_reason in BAD_TERMINATIONS:
+        logger.info(f"[EP {ep}] BAD termination ({done_reason}) => discard episode transitions")
+    else:
+        logger.info(f"[EP {ep}] GOOD episode => storing {len(episode_buffer):,} transitions")
+        for (s, a, r, ns, d) in episode_buffer:
+            replay.store(s, a, r, ns, d)
+
     logger.info(f"[EP {ep}] replay_size={len(replay):,}")
+
+    if len(replay) > agent.batch_size:
+        agent.update()
 
     if ep % CHECKPOINT_INTERVAL == 0 and ep > 0:
         save_checkpoint(ep, agent, tag="interval")
