@@ -235,12 +235,13 @@ for ep in range(EPOCHS):
         # 3) STORE — OPTION1: obs_atom/no flatten
         ################################################################
         replay.store(
-            s=obs_atom,           # ★ per-atom obs 저장
-            a=action_global,
-            r=reward_scalar,
-            ns=next_atom,         # ★ next per-atom obs 저장
-            d=done
+            obs_atom,
+            action_global,
+            reward_scalar,
+            next_atom,
+            done
         )
+
 
         ################################################################
         # 4) LOGGING
