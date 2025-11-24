@@ -1,6 +1,7 @@
 ##############################
 # train_mof_multi_env.py  
 # Multi-ENV + Curriculum Horizon + Full Logging + XYZ trajectory dump
+# ★ per-structure RL version (critical fix)
 ##############################
 
 import os
@@ -24,7 +25,7 @@ from utils.replay_buffer import ReplayBuffer
 ############################################################
 log_handler = RotatingFileHandler(
     "train.log",
-    maxBytes=10_000_000,
+    maxBytes=20_000_000,
     backupCount=10,
 )
 log_handler.setFormatter(logging.Formatter(
@@ -83,67 +84,45 @@ calc = MACECalculator(
 ############################################################
 # CONFIG
 ############################################################
-EPOCHS       = 1500           # 총 에피소드
-BASE_STEPS   = 300           # 초기 max_steps
-FINAL_STEPS  = 1000          # 최종 max_steps
-HORIZON_SCH  = 500           # 500 episode 동안 300 → 1000으로 증가
+EPOCHS       = 1500
+BASE_STEPS   = 300
+FINAL_STEPS  = 1000
+HORIZON_SCH  = 500
 
 FMAX_THRESH  = 0.05
-BUFFER_SIZE  = 3_000_000
-BATCH_SIZE   = 256
+BUFFER_SIZE  = 1_000_000      # per-structure buffer → much smaller OK
+BATCH_SIZE   = 64
 
-OBS_DIM = 360
-
-ACT_DIM      = 3
 CHECKPOINT_INTERVAL = 5
-
-
-############################################################
-# replay + agent
-############################################################
-replay = ReplayBuffer(obs_dim=OBS_DIM, act_dim=ACT_DIM, max_size=BUFFER_SIZE)
-
-agent = SACAgent(
-    obs_dim=OBS_DIM,
-    act_dim=ACT_DIM,
-    replay_buffer=replay,
-    device="cuda",
-    lr=3e-4,
-    gamma=0.995,
-    tau=5e-3,
-    batch_size=BATCH_SIZE,
-)
-
 
 ############################################################
 # TRAIN LOOP
 ############################################################
-logger.info(f"[MACS-MOF] Training start EPOCHS={EPOCHS}, BASE_STEPS={BASE_STEPS}, FINAL_STEPS={FINAL_STEPS}")
+logger.info(f"[MACS-MOF] Training start (EPOCHS={EPOCHS})")
 
 global_start = time.time()
 
+# replay buffer (will reallocate after env.init)
+replay = None
+agent = None
 
 for ep in range(EPOCHS):
 
     logger.info("\n" + "="*80)
     logger.info(f"[EP {ep}] START")
 
-    # ------------------------------------------------------
-    # 🔥 Horizon Curriculum 적용
-    # ------------------------------------------------------
+    ############################################################
+    # Horizon schedule
+    ############################################################
     ratio = min(ep / HORIZON_SCH, 1.0)
     max_steps = int(BASE_STEPS + (FINAL_STEPS - BASE_STEPS) * ratio)
     max_steps = min(max_steps, FINAL_STEPS)
 
-    logger.info(f"[EP {ep}] max_steps set to {max_steps}")
+    logger.info(f"[EP {ep}] max_steps = {max_steps}")
 
-    obs = None
-    env = None
-    ep_ret = 0.0
-
-    # ------------------------------
-    # 🔥 EPISODE SNAPSHOT FOLDER
-    # ------------------------------
+    ################################################################
+    # Snapshot directory
+    ################################################################
     snap_dir = f"snapshots/EP{ep:04d}"
     os.makedirs(snap_dir, exist_ok=True)
 
@@ -153,10 +132,9 @@ for ep in range(EPOCHS):
     if os.path.exists(traj_path): os.remove(traj_path)
     if os.path.exists(energy_path): os.remove(energy_path)
 
-
-    # ------------------------------
-    # 🔥 STRUCTURE INIT (per episode)
-    # ------------------------------
+    ############################################################
+    # Load CIF + init ENV
+    ############################################################
     cif = sample_cif()
     atoms = read(cif)
     atoms.calc = calc
@@ -172,71 +150,107 @@ for ep in range(EPOCHS):
     obs = env.reset()
     logger.info(f"[EP {ep}] CIF loaded: {cif}")
 
+    N_atom = env.N
+    single_obs_dim = obs.shape[1]
+    OBS_DIM = N_atom * single_obs_dim      # per-structure obs
+    ACT_DIM = N_atom * 3                   # per-structure action
 
-    ##################################################
+    ############################################################
+    # allocate replay + agent (only at EP 0)
+    ############################################################
+    if ep == 0:
+        logger.info(f"[INIT] OBS_DIM={OBS_DIM:,}, ACT_DIM={ACT_DIM:,}")
+        replay = ReplayBuffer(obs_dim=OBS_DIM, act_dim=ACT_DIM, max_size=BUFFER_SIZE)
+
+        agent = SACAgent(
+            obs_dim=OBS_DIM,
+            act_dim=ACT_DIM,
+            replay_buffer=replay,
+            device="cuda",
+            lr=3e-4,
+            gamma=0.995,
+            tau=5e-3,
+            batch_size=BATCH_SIZE,
+        )
+
+        logger.info("[INIT] Agent + ReplayBuffer allocated.")
+
+    ############################################
     # EPISODE LOOP
-    ##################################################
+    ############################################
+    ep_ret = 0.0
+
     for step in tqdm(range(max_steps), desc=f"[EP {ep}]", ncols=120):
 
-        # ---- RL action ----
-        act = agent.act(obs)
+        ############################################################
+        # per-structure action (flattened)
+        ############################################################
+        obs_flat = obs.reshape(-1)
+        act_flat = agent.act(obs_flat)         # shape (ACT_DIM,)
+        act = act_flat.reshape(N_atom, 3)
+
         next_obs, rew, done = env.step(act)
 
-        # store all atoms transitions
-        for i in range(env.N):
-            replay.store(obs[i], act[i], rew[i], next_obs[i], done)
+        ############################################################
+        # per-structure reward (critical)
+        ############################################################
+        global_rew = float(np.mean(rew))
+
+        ############################################################
+        # Store one transition per structure
+        ############################################################
+        next_obs_flat = next_obs.reshape(-1)
+
+        replay.store(
+            obs_flat,
+            act_flat,
+            global_rew,
+            next_obs_flat,
+            done
+        )
 
         if len(replay) > agent.batch_size:
             agent.update()
 
         obs = next_obs
-        ep_ret += float(np.mean(rew))
+        ep_ret += global_rew
 
-        # ------------------------------------------------------
-        # 🔥 SAVE XYZ FRAME
-        # ------------------------------------------------------
+        ############################################################
+        # Save trajectory
+        ############################################################
         env.atoms.write(traj_path, append=True)
 
-        # ------------------------------------------------------
-        # 🔥 SAVE ENERGY
-        # ------------------------------------------------------
+        # Save energy
         E_total = env.atoms.get_potential_energy()
         E_pa = E_total / env.N
-
         with open(energy_path, "a") as f:
             f.write(f"{step} {E_total:.8f} {E_pa:.8f}\n")
 
-        # force stats
+        # Logging step stats
         f = np.linalg.norm(env.forces, axis=1)
-        f_avg, f_max, f_min = float(np.mean(f)), float(np.max(f)), float(np.min(f))
-
         logger.info(
             f"[EP {ep}][STEP {step}] "
-            f"Natom={env.N} | "
-            f"Favg={f_avg:.6f} Fmax={f_max:.6f} Fmin={f_min:.6f} | "
-            f"rew={float(np.mean(rew)):.6f} | "
-            f"replay={len(replay):,} | "
-            f"alpha={float(agent.alpha):.6f}"
+            f"Natom={env.N} | Favg={np.mean(f):.6f} Fmax={np.max(f):.6f} "
+            f"rew={global_rew:.6f} | replay={len(replay):,} | alpha={float(agent.alpha):.6f}"
         )
 
         if done:
-            logger.info(f"[EP {ep}] terminated at step={step}")
+            logger.info(f"[EP {ep}] terminated early at step={step}")
             break
 
-
-    ##################################################
+    ############################################################
     # EPISODE END
-    ##################################################
+    ############################################################
     logger.info(f"[EP {ep}] return={ep_ret:.6f}")
-    logger.info(f"[EP {ep}] replay={len(replay):,}")
+    logger.info(f"[EP {ep}] replay_size={len(replay):,}")
 
     if ep % CHECKPOINT_INTERVAL == 0 and ep > 0:
         save_checkpoint(ep, agent, tag="interval")
 
 
-# ===================================
+############################################################
 # FINAL CHECKPOINT
-# ===================================
+############################################################
 save_checkpoint(EPOCHS, agent, tag="final")
 
 logger.info("[TRAIN DONE]")
