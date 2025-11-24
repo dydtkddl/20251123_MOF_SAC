@@ -12,10 +12,11 @@ class ReplayBuffer:
         next_obs_i  : (obs_dim,)
         done        : bool
     --------------------------------------------------------------------
-    Includes:
+    Features:
         - reward-weighted storage (priority-like)
+        - reward clipping ready
         - smaller buffer (200k)
-        - warm-up support
+        - warm-up support (default 10k)
     --------------------------------------------------------------------
     """
 
@@ -23,8 +24,8 @@ class ReplayBuffer:
         self,
         obs_dim: int,
         max_size: int = 200_000,
-        reward_weight: float = 2.0,     # how strongly reward influences storage
-        warmup: int = 10_000,           # minimum samples before training allowed
+        reward_weight: float = 2.0,     # reward priority strength
+        warmup: int = 10_000,           # minimum samples before training
     ):
         self.obs_dim = obs_dim
         self.act_dim = 3                # dx, dy, dz only
@@ -43,27 +44,29 @@ class ReplayBuffer:
         self.rew_buf  = np.zeros(max_size, dtype=np.float32)
         self.done_buf = np.zeros(max_size, dtype=np.bool_)
 
+
     # ============================================================
-    # Reward-weighted storage
+    # Reward-weighted storage (priority-like sampling)
     # ============================================================
     def store(self, obs_i, act_i, rew_i, next_obs_i, done_i):
         """
         Reward-weighted storage rule:
             p_store = sigmoid(|reward| * reward_weight)
-        This increases chance of storing transitions with informative reward.
+        This increases probability of storing transitions with informative reward.
         """
 
         # reward magnitude determines priority
         mag = abs(float(rew_i))
 
-        # weighted probability (keeps range 0~1)
+        # Compute storage probability
+        # sigmoid(x) = 1 / (1 + e^(-x))
         p = 1.0 / (1.0 + np.exp(- self.reward_weight * mag))
 
-        # decide whether to store this transition
+        # Decide store or skip
         if np.random.rand() > p:
-            return False     # skip (noise, low-quality transitions)
+            return False    # skip weak / noise transitions
 
-        # store transition
+        # Store transition
         self.obs_buf[self.ptr]  = obs_i
         self.act_buf[self.ptr]  = act_i
         self.rew_buf[self.ptr]  = rew_i
@@ -75,8 +78,9 @@ class ReplayBuffer:
 
         return True
 
+
     # ============================================================
-    # Mini-batch sample
+    # Random mini-batch sampling
     # ============================================================
     def sample(self, batch_size):
         assert (
@@ -93,10 +97,12 @@ class ReplayBuffer:
             done = self.done_buf[idxs],
         )
 
+
     # ============================================================
     def ready(self):
-        """Return True once buffer has enough samples for training."""
+        """Return True if buffer has enough samples for training."""
         return self.size >= self.warmup
+
 
     def __len__(self):
         return self.size

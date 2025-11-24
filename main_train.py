@@ -90,9 +90,10 @@ FINAL_STEPS  = 1000
 HORIZON_SCH  = 500
 
 FMAX_THRESH  = 0.05
-BUFFER_SIZE  = 200_000          # ★ smaller buffer for stable RL
+BUFFER_SIZE  = 200_000
 BATCH_SIZE   = 256
 
+WARMUP = 10_000
 CHECKPOINT_INTERVAL = 5
 
 
@@ -100,7 +101,7 @@ CHECKPOINT_INTERVAL = 5
 # GLOBALS
 ##############################################
 OBS_DIM = None
-ACT_DIM = 3   # per-atom action = 3-dim
+ACT_DIM = 3
 replay = None
 agent = None
 
@@ -169,7 +170,7 @@ for ep in range(EPOCHS):
             obs_dim=OBS_DIM,
             max_size=BUFFER_SIZE,
             reward_weight=2.0,
-            warmup=10_000,
+            warmup=WARMUP,
         )
 
         agent = SACAgent(
@@ -181,7 +182,7 @@ for ep in range(EPOCHS):
             gamma=0.995,
             tau=5e-3,
             batch_size=BATCH_SIZE,
-            update_every=4,           # ★ update frequency
+            update_every=4,           # ★ Update frequency
             normalize_adv=True,
         )
         logger.info("[INIT] Agent + ReplayBuffer allocated (per-atom).")
@@ -208,7 +209,7 @@ for ep in range(EPOCHS):
         next_obs, reward, done = env.step(action)
 
         # ------------------------------
-        # ★ reward clipping for stability
+        # ★ reward clipping
         # ------------------------------
         clipped_reward = np.clip(reward, -5.0, 5.0)
 
@@ -231,7 +232,7 @@ for ep in range(EPOCHS):
             agent.update()
 
         ########################
-        # TRAJECTORY SAVE
+        # SAVE TRAJECTORY
         ########################
         env.atoms.write(traj_path, append=True)
 
