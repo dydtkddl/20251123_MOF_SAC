@@ -89,15 +89,35 @@ class SACAgent:
     @torch.no_grad()
     def act(self, obs):
         """
-        obs: (obs_dim,) or (1, obs_dim)
-        returns: (3,) np.float32
+        obs: numpy (obs_dim,) or (1,obs_dim)
+        return: numpy (3,)
         """
-        if obs.ndim == 1:
-            obs = obs[None, :]
 
-        obs_t = torch.as_tensor(obs, dtype=torch.float32, device=self.device)
-        action_vec = self.actor.act_tensor(obs_t)   # → (1,3)
-        return action_vec.squeeze(0).cpu().numpy()
+        # ---- (1) obs → torch tensor (1,obs_dim) ----
+        if isinstance(obs, np.ndarray):
+            if obs.ndim == 1:
+                obs_t = torch.as_tensor(obs, dtype=torch.float32, device=self.device).unsqueeze(0)
+            else:
+                obs_t = torch.as_tensor(obs, dtype=torch.float32, device=self.device)
+        elif torch.is_tensor(obs):
+            if obs.dim() == 1:
+                obs_t = obs.unsqueeze(0).to(self.device)
+            else:
+                obs_t = obs.to(self.device)
+        else:
+            raise TypeError("obs must be numpy or torch")
+
+        # ---- (2) actor returns numpy (3,) ----
+        action = self.actor.act_tensor(obs_t)   # returns (3,) numpy
+
+        # ---- (3) ensure (3,) shape ----
+        action = np.asarray(action).reshape(-1)
+        if action.size < 3:
+            raise RuntimeError(f"Actor returned invalid action size={action.size}")
+
+        action = action[:3].astype(np.float32)
+
+        return action
 
 
     # ---------------------------------------------------------------------------
