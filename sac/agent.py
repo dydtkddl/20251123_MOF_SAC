@@ -1,24 +1,16 @@
 import numpy as np
 import torch
-import torch.nn.functional as F
 import torch.optim as optim
+import torch.nn.functional as F
 
 from .actor import Actor
 from .critic import CriticQ, CriticV
 
 
 ###############################################################################
-# Soft Actor-Critic Agent for MOF Structure Optimization
+# SAC Agent (Stable for MOF)
 ###############################################################################
 class SACAgent:
-    """
-    SAC agent for MOF structure optimization using:
-        - scalar action = RL scale-factor (0~1)
-        - displacement = scale * (-force_direction)
-        - PER using TD-error priority
-        - deep actor/critic networks
-        - soft target V update
-    """
 
     def __init__(
         self,
@@ -31,43 +23,32 @@ class SACAgent:
         batch_size=256,
         lr=3e-4,
         n_step=1,
-        target_entropy=-0.5
+        target_entropy=-0.3
     ):
         self.replay = replay_buffer
         self.batch_size = batch_size
         self.device = torch.device(device if torch.cuda.is_available() else "cpu")
 
-        # ============================
-        # Hyperparameters
-        # ============================
         self.gamma = gamma
+        self.gamma_n = gamma ** n_step
         self.tau = tau
         self.n_step = n_step
-        self.gamma_n = gamma ** n_step
 
-        # ============================
         # Networks
-        # ============================
-        self.actor = Actor(obs_dim, act_dim).to(self.device).float()
-
-        self.q1 = CriticQ(obs_dim, act_dim).to(self.device).float()
-        self.q2 = CriticQ(obs_dim, act_dim).to(self.device).float()
-
-        self.v = CriticV(obs_dim).to(self.device).float()
-        self.v_tgt = CriticV(obs_dim).to(self.device).float()
+        self.actor = Actor(obs_dim, act_dim).to(self.device)
+        self.q1 = CriticQ(obs_dim, act_dim).to(self.device)
+        self.q2 = CriticQ(obs_dim, act_dim).to(self.device)
+        self.v = CriticV(obs_dim).to(self.device)
+        self.v_tgt = CriticV(obs_dim).to(self.device)
         self.v_tgt.load_state_dict(self.v.state_dict())
 
-        # ============================
         # Optimizers
-        # ============================
         self.actor_opt = optim.Adam(self.actor.parameters(), lr=lr)
         self.q1_opt = optim.Adam(self.q1.parameters(), lr=lr)
         self.q2_opt = optim.Adam(self.q2.parameters(), lr=lr)
         self.v_opt = optim.Adam(self.v.parameters(), lr=lr)
 
-        # ============================
-        # Temperature α
-        # ============================
+        # Temperature parameter
         self.log_alpha = torch.zeros(1, device=self.device, requires_grad=True)
         self.alpha_opt = optim.Adam([self.log_alpha], lr=lr)
         self.target_entropy = target_entropy
@@ -75,28 +56,24 @@ class SACAgent:
         self.total_steps = 0
 
 
-    ###########################################################################
-    # α (entropy temperature)
-    ###########################################################################
     @property
     def alpha(self):
         return self.log_alpha.exp()
 
 
     ###########################################################################
-    # Deterministic action (evaluation)
+    # Deterministic policy for evaluation
     ###########################################################################
     @torch.no_grad()
     def act(self, obs):
         if obs.ndim == 1:
             obs = obs[np.newaxis, :]
         obs_t = torch.as_tensor(obs, device=self.device, dtype=torch.float32)
-        scale, _, _, _ = self.actor(obs_t)
-        return scale.cpu().numpy()
+        return self.actor.act(obs_t.cpu().numpy())
 
 
     ###########################################################################
-    # Main SAC update step
+    # SAC Update
     ###########################################################################
     def update(self):
 
@@ -111,25 +88,25 @@ class SACAgent:
         weights = torch.as_tensor(batch["weights"], dtype=torch.float32, device=self.device).unsqueeze(-1)
         idxs = batch["idx"]
 
-        ###################################################################
-        # 1. Update α (entropy temperature)
-        ###################################################################
+        #######################################################################
+        # 1. Update α
+        #######################################################################
         scale_s, logp_s, _, _ = self.actor(obs)
 
         alpha_loss = -(self.log_alpha * (logp_s + self.target_entropy).detach()).mean()
 
         self.alpha_opt.zero_grad()
         alpha_loss.backward()
+        torch.nn.utils.clip_grad_norm_(self.alpha_opt.param_groups[0]['params'], 0.5)
         self.alpha_opt.step()
 
-        # Clamp α for stability
         with torch.no_grad():
-            self.log_alpha.data.clamp_(min=-4.0, max=0.0)
+            self.log_alpha.data.clamp_(min=-4.0, max=-1.2)
 
 
-        ###################################################################
-        # 2. Update Q networks (TD target)
-        ###################################################################
+        #######################################################################
+        # 2. Q-network update
+        #######################################################################
         with torch.no_grad():
             v_next = self.v_tgt(nobs)
             q_target = rew + (1 - done) * self.gamma_n * v_next
@@ -145,22 +122,24 @@ class SACAgent:
 
         self.q1_opt.zero_grad()
         q1_loss.backward()
+        torch.nn.utils.clip_grad_norm_(self.q1.parameters(), 0.5)
         self.q1_opt.step()
 
         self.q2_opt.zero_grad()
         q2_loss.backward()
+        torch.nn.utils.clip_grad_norm_(self.q2.parameters(), 0.5)
         self.q2_opt.step()
 
         # PER priority update
         with torch.no_grad():
             priority = torch.max(td1.abs(), td2.abs()).cpu().numpy().flatten()
             for i, p in zip(idxs, priority):
-                self.replay.update_priority(i, p)
+                self.replay.update_priority(i, float(p + 1e-6))
 
 
-        ###################################################################
-        # 3. Update V(s)
-        ###################################################################
+        #######################################################################
+        # 3. V-network update
+        #######################################################################
         v_pred = self.v(obs)
 
         with torch.no_grad():
@@ -174,13 +153,15 @@ class SACAgent:
 
         self.v_opt.zero_grad()
         v_loss.backward()
+        torch.nn.utils.clip_grad_norm_(self.v.parameters(), 0.5)
         self.v_opt.step()
 
 
-        ###################################################################
-        # 4. Policy update (every 2 steps for stability)
-        ###################################################################
+        #######################################################################
+        # 4. Policy update
+        #######################################################################
         policy_loss = None
+
         if self.total_steps % 2 == 0:
 
             scale2, logp2, _, _ = self.actor(obs)
@@ -195,16 +176,15 @@ class SACAgent:
 
             self.actor_opt.zero_grad()
             policy_loss.backward()
+            torch.nn.utils.clip_grad_norm_(self.actor.parameters(), 0.5)
             self.actor_opt.step()
 
+            # soft target update
             self.soft_update()
 
         self.total_steps += 1
 
 
-        ###################################################################
-        # Output log dictionary
-        ###################################################################
         return dict(
             policy_loss=float(policy_loss) if policy_loss is not None else None,
             q1_loss=float(q1_loss),
@@ -215,8 +195,6 @@ class SACAgent:
         )
 
 
-    ###########################################################################
-    # Soft target update: V_target ← τ V + (1−τ) V_target
     ###########################################################################
     def soft_update(self):
         with torch.no_grad():

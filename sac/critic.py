@@ -3,79 +3,54 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
-###########################################################################
-# Activation: MISH (Actor와 동일하게 사용)
-###########################################################################
-class Mish(nn.Module):
+######################################################################
+# Swish Activation
+######################################################################
+class Swish(nn.Module):
     def forward(self, x):
-        return x * torch.tanh(F.softplus(x))
+        return x * torch.sigmoid(x)
 
 
-###########################################################################
-# CriticV(s): Value Function (Deep & Stable)
-###########################################################################
+######################################################################
+# V(s)
+######################################################################
 class CriticV(nn.Module):
-    """
-    V(s) network:
-        Input : obs_dim (~30~40)
-        Output: scalar state value
-    """
 
-    def __init__(self, obs_dim, hidden_sizes=[256, 256, 128, 64, 32]):
+    def __init__(self, obs_dim, hidden=[256, 256, 128, 64, 32]):
         super().__init__()
 
         layers = []
-        in_dim = obs_dim
+        d = obs_dim
 
-        for h in hidden_sizes:
-            layers.append(nn.Linear(in_dim, h))
-            layers.append(nn.LayerNorm(h))
-            layers.append(Mish())
-            in_dim = h
+        for h in hidden:
+            layers += [nn.Linear(d, h), nn.LayerNorm(h), Swish()]
+            d = h
 
-        layers.append(nn.Linear(in_dim, 1))  # final output
-
+        layers += [nn.Linear(d, 1)]
         self.net = nn.Sequential(*layers)
 
     def forward(self, obs):
-        """
-        obs: (batch, obs_dim)
-        return: (batch, 1)
-        """
         if obs.dim() == 1:
             obs = obs.unsqueeze(0)
         return self.net(obs)
 
 
-###########################################################################
-# CriticQ(s, a): Q-function for scalar action (scale ∈ [0,1])
-###########################################################################
+######################################################################
+# Q(s,a)
+######################################################################
 class CriticQ(nn.Module):
-    """
-    Q(s, a):
 
-    Input:
-        obs → (batch, obs_dim)
-        act → (batch, 1)
-
-    Output:
-        Q-value → (batch, 1)
-    """
-
-    def __init__(self, obs_dim, act_dim=1, hidden_sizes=[256, 256, 128, 64, 32]):
+    def __init__(self, obs_dim, act_dim=1, hidden=[256, 256, 128, 64, 32]):
         super().__init__()
 
         layers = []
-        in_dim = obs_dim + act_dim  # concat(s, a)
+        d = obs_dim + act_dim
 
-        for h in hidden_sizes:
-            layers.append(nn.Linear(in_dim, h))
-            layers.append(nn.LayerNorm(h))
-            layers.append(Mish())
-            in_dim = h
+        for h in hidden:
+            layers += [nn.Linear(d, h), nn.LayerNorm(h), Swish()]
+            d = h
 
-        layers.append(nn.Linear(in_dim, 1))
-
+        layers += [nn.Linear(d, 1)]
         self.net = nn.Sequential(*layers)
 
     def forward(self, obs, act):
