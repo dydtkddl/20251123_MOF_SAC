@@ -1,11 +1,13 @@
 ###############################################################
 # sac/critic.py — MACS 3D-Action Fully Compatible FINAL VERSION
+# - CriticV: V(s)
+# - CriticQ: Q(s,a)  (3D action version)
+# - TwinCriticQ: SAC Double-Q (Q1, Q2)
 ###############################################################
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-
+import numpy as np
 
 ###############################################################
 # Swish activation (same as actor)
@@ -16,99 +18,127 @@ class Swish(nn.Module):
 
 
 ###############################################################
-# Value Critic V(s)
+# Utility: build a MACS-style MLP block (Swish + LayerNorm)
+###############################################################
+def build_mlp(in_dim, hidden_sizes, out_dim, final_act=False):
+    layers = []
+    d = in_dim
+
+    for h in hidden_sizes:
+        layers += [
+            nn.Linear(d, h),
+            nn.LayerNorm(h),
+            Swish()
+        ]
+        d = h
+
+    layers.append(nn.Linear(d, out_dim))
+
+    if final_act:
+        layers.append(Swish())
+
+    return nn.Sequential(*layers)
+
+
+###############################################################
+# Value Critic: V(s)
 ###############################################################
 class CriticV(nn.Module):
+    """
+    V(s) network.
+    Input: obs_dim
+    Output: scalar value V(s)
+    """
 
     def __init__(
         self,
-        obs_dim,
+        obs_dim: int,
         hidden=[256, 256, 128, 64]
     ):
-        """
-        V(s) network.
-        Input: obs_dim
-        Output: scalar V(s)
-        """
-
         super().__init__()
 
-        layers = []
-        d = obs_dim
+        self.obs_dim = obs_dim
+        self.net = build_mlp(
+            in_dim=obs_dim,
+            hidden_sizes=hidden,
+            out_dim=1,
+            final_act=False
+        )
 
-        # Deep backbone: LN + Swish (MACS stability)
-        for h in hidden:
-            layers += [
-                nn.Linear(d, h),
-                nn.LayerNorm(h),
-                Swish()
-            ]
-            d = h
-
-        # Output layer
-        layers += [nn.Linear(d, 1)]
-
-        self.net = nn.Sequential(*layers)
-
-    def forward(self, obs):
-        """
-        obs: (B, obs_dim)
-        """
+    def forward(self, obs: torch.Tensor):
         if obs.dim() == 1:
             obs = obs.unsqueeze(0)
-
         return self.net(obs)
 
 
 ###############################################################
-# Action-Value Critic Q(s,a)
+# Single Q-network: Q(s,a)
 ###############################################################
 class CriticQ(nn.Module):
+    """
+    Q(s,a) network.
+    Input:
+        obs: (B, obs_dim)
+        act: (B, 3)   # ★ 3D action
+    Output:
+        Q-value scalar
+    """
 
     def __init__(
         self,
-        obs_dim,
-        act_dim=3,                 # ★ 3D action for MACS
+        obs_dim: int,
+        act_dim: int = 3,
         hidden=[256, 256, 128, 64]
     ):
-        """
-        Q(s,a) network.
-        Input: concat(obs, action)
-        Output: scalar Q(s,a)
-        """
-
         super().__init__()
 
-        layers = []
-        d = obs_dim + act_dim      # ★ MUST match actor's 3D action
+        self.obs_dim = obs_dim
+        self.act_dim = act_dim
 
-        # Deep backbone
-        for h in hidden:
-            layers += [
-                nn.Linear(d, h),
-                nn.LayerNorm(h),
-                Swish()
-            ]
-            d = h
+        self.net = build_mlp(
+            in_dim=obs_dim + act_dim,
+            hidden_sizes=hidden,
+            out_dim=1,
+            final_act=False
+        )
 
-        # Output
-        layers += [nn.Linear(d, 1)]
-
-        self.net = nn.Sequential(*layers)
-
-    def forward(self, obs, act):
+    def forward(self, obs: torch.Tensor, act: torch.Tensor):
         """
         obs: (B, obs_dim)
         act: (B, 3)
         """
-
-        # single sample → batchify
         if obs.dim() == 1:
             obs = obs.unsqueeze(0)
         if act.dim() == 1:
             act = act.unsqueeze(0)
 
-        # Concatenate in correct order
         x = torch.cat([obs, act], dim=-1)
-
         return self.net(x)
+
+
+###############################################################
+# Twin Critic for SAC: Q1(s,a), Q2(s,a)
+###############################################################
+class TwinCriticQ(nn.Module):
+    """
+    Two independent Q networks for SAC
+    (Q1, Q2) to mitigate positive bias.
+    """
+
+    def __init__(
+        self,
+        obs_dim: int,
+        act_dim: int = 3,
+        hidden=[256, 256, 128, 64]
+    ):
+        super().__init__()
+
+        self.Q1 = CriticQ(obs_dim, act_dim, hidden)
+        self.Q2 = CriticQ(obs_dim, act_dim, hidden)
+
+    def forward(self, obs: torch.Tensor, act: torch.Tensor):
+        """
+        returns:
+            Q1(s,a), Q2(s,a)
+        """
+        return self.Q1(obs, act), self.Q2(obs, act)

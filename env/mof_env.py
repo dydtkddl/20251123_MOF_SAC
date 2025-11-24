@@ -1,10 +1,10 @@
 ###############################################################
 # env/mof_env.py — HYBRID-MACS (Final Native 3D Action Version)
-# Completely PBC-aware, MACS-displacement formalism implemented
+# Completely PBC-aware, MACS displacement formalism implemented
 # Features:
 #   - Full 3D vector action u_i ∈ [-1,1]^3
 #   - disp_i = c_i * u_i   (MACS displacement)
-#   - PBC-corrected kNN neighbors
+#   - PBC-corrected kNN neighbors (MACS)
 #   - f_i hybrid descriptors + neighbor features
 #   - bond-breaking, COM-drift, fmax termination
 #   - Δlog|F| reward (MACS)
@@ -29,10 +29,10 @@ class MOFEnv:
         max_steps=300,
 
         # MACS displacement scale
-        disp_scale=0.03,
-        cmax=0.40,             # maximum displacement magnitude per-step
+        disp_scale=0.03,      # base displacement scaling
+        cmax=0.40,            # max displacement magnitude
 
-        # termination
+        # termination criteria
         fmax_threshold=0.05,
         com_threshold=0.25,
         com_lambda=4.0,
@@ -87,8 +87,6 @@ class MOFEnv:
         frac = np.linalg.solve(cell.T, diff)
         frac -= np.round(frac)
         return frac @ cell
-
-
     ###################################################################
     # MACS-style k-Nearest Neighbors (PBC)
     ###################################################################
@@ -159,6 +157,8 @@ class MOFEnv:
                     d0.append(d)
 
         return np.array(bonds), np.array(d0)
+
+
     ###################################################################
     # Coordination number (bond-based)
     ###################################################################
@@ -168,8 +168,6 @@ class MOFEnv:
             CN[i] += 1
             CN[j] += 1
         return CN
-
-
     ###################################################################
     # Local planarity (PBC-based)
     ###################################################################
@@ -194,10 +192,8 @@ class MOFEnv:
             if len(neigh) < 3:
                 continue
 
-            # Take three neighbors
             a, b, c = neigh[:3]
 
-            # PBC vectors
             v1 = self._pbc_vec(i, a)
             v2 = self._pbc_vec(i, b)
             v3 = self._pbc_vec(i, c)
@@ -215,7 +211,7 @@ class MOFEnv:
 
 
     ###################################################################
-    # Local graph radius (sum bond lengths)
+    # Local graph radius
     ###################################################################
     def _local_graph_radius(self):
         R = np.zeros(self.N)
@@ -241,7 +237,7 @@ class MOFEnv:
 
 
     ###################################################################
-    # Torsion (dihedral) angle — PBC-based
+    # Torsion angle — PBC-based dihedral
     ###################################################################
     def _torsion(self):
         tors = np.zeros(self.N)
@@ -290,7 +286,7 @@ class MOFEnv:
 
 
     ###################################################################
-    # Local stress = ||F|| × CN
+    # Local stress = |F| × CN
     ###################################################################
     def _local_stress(self, CN):
         fmag = np.linalg.norm(self.forces, axis=1)
@@ -302,7 +298,7 @@ class MOFEnv:
     ###################################################################
     def _sbu_id(self):
         Z = self.atomic_numbers
-        metals = {20,22,23,24,25,26,27,28,29,40,42,44}  # Ca,Ti,V,Cr,Mn,Fe,Co,Ni,Cu,Zr,Mo,Ru
+        metals = {20,22,23,24,25,26,27,28,29,40,42,44}
         arr = np.zeros(self.N)
         cid = 1
         for i in range(self.N):
@@ -310,10 +306,8 @@ class MOFEnv:
                 arr[i] = cid
                 cid += 1
         return arr
-
-
     ###################################################################
-    # Build full hybrid feature f_i (center features)
+    # Build center feature f_i
     ###################################################################
     def _build_f(self):
 
@@ -321,19 +315,19 @@ class MOFEnv:
         f_norm = np.linalg.norm(F, axis=1) + 1e-12
         f_unit = F / f_norm[:, None]
 
-        # History force
+        # Force history
         if self.F_prev is None:
             dF = np.zeros_like(F)
         else:
             dF = F - self.F_prev
 
-        # History displacement
+        # Displacement history
         if self.disp_last is None:
             disp_prev = np.zeros_like(F)
         else:
             disp_prev = self.disp_last
 
-        # Chemical & structural features
+        # Chemical / structural descriptors
         CN      = self._coordination_numbers()
         planar  = self._local_planarity()
         graphR  = self._local_graph_radius()
@@ -342,47 +336,42 @@ class MOFEnv:
         stress  = self._local_stress(CN)
         sbu     = self._sbu_id()
 
-        # Global features
+        # Global force stats
         gF_mean = float(np.mean(f_norm))
         gF_std  = float(np.std(f_norm) + 1e-12)
 
         logF = np.log(f_norm)
 
-        # center feature vector f_i
+        # Final center feature (f_i)
         f = np.concatenate([
-            f_unit,                     # 3
-            logF[:,None],               # 1
-            F,                          # 3
-            dF,                         # 3
-            disp_prev,                  # 3
-            CN[:,None],                 # 1
-            planar[:,None],             # 1
-            graphR[:,None],             # 1
-            stiff[:,None],              # 1
-            tors[:,None],               # 1
-            stress[:,None],             # 1
-            sbu[:,None],                # 1
-            np.full((self.N,1), gF_mean),  # 1
-            np.full((self.N,1), gF_std),   # 1
+            f_unit,                       # 3
+            logF[:,None],                 # 1
+            F,                            # 3
+            dF,                           # 3
+            disp_prev,                    # 3
+            CN[:,None], planar[:,None], graphR[:,None],
+            stiff[:,None], tors[:,None], stress[:,None],
+            sbu[:,None],
+            np.full((self.N,1), gF_mean),
+            np.full((self.N,1), gF_std),
         ], axis=1).astype(np.float32)
 
         return f
 
 
     ###################################################################
-    # Build observation (center feature + neighbor features)
+    # Build observation (MACS hybrid + neighbors)
     ###################################################################
     def _obs(self):
 
         f = self._build_f()
-
         nbr_idx, relpos, dist = self._kNN()
-        N, k = self.N, self.k
 
+        N, k = self.N, self.k
         Fdim = f.shape[1]
 
         # final observation per atom
-        obs = np.zeros((N, Fdim + k*Fdim + k*3 + k), dtype=np.float32)
+        obs = np.zeros((N, Fdim + k * Fdim + k * 3 + k), dtype=np.float32)
 
         for i in range(N):
 
@@ -390,18 +379,17 @@ class MOFEnv:
 
             obs[i] = np.concatenate([
                 f[i],                         # center feature
-                neigh_f,                      # neighbor features
-                relpos[i].reshape(-1),        # neighbor relative positions
+                neigh_f,                      # neighbors concatenated
+                relpos[i].reshape(-1),        # PBC relative positions
                 dist[i].reshape(-1)           # scalar distances
             ])
 
         return obs
     ###################################################################
-    # Reset — fresh structure, fresh history
+    # Reset: fresh structure, fresh history
     ###################################################################
     def reset(self):
 
-        # Load structure
         self.atoms = self.loader()
         self.N = len(self.atoms)
         self.atomic_numbers = np.array([a.number for a in self.atoms])
@@ -409,30 +397,25 @@ class MOFEnv:
         # initial forces
         self.forces = self.atoms.get_forces().astype(np.float32)
 
-        # build initial bond list (PBC-aware)
+        # bond list
         self.bond_pairs, self.bond_d0 = self._detect_bonds()
 
-        # history features
         self.F_prev = None
         self.disp_last = None
 
-        # COM anchor
         self.com_prev = self.atoms.positions.mean(axis=0)
-
-        # step count
         self.step_count = 0
 
         return self._obs()
 
 
     ###################################################################
-    # STEP — FULL MACS-COMPATIBLE, 3D displacement, PBC-safe
+    # STEP — full MACS displacement + PBC
     ###################################################################
     def step(self, action_u):
         """
-        action_u: shape (N, 3), each component in [-1, 1]
-        u_i is the direction chosen by policy
-        displacement = c_i * u_i  (MACS Eq.4)
+        action_u: shape (N, 3) in [-1,1]^3
+        displacement: d_i = c_i * u_i (MACS Eq.4)
         """
 
         self.step_count += 1
@@ -440,62 +423,55 @@ class MOFEnv:
         F_old = self.forces
         fnorm = np.linalg.norm(F_old, axis=1) + 1e-12
 
-        # -----------------------------------------------------------
-        # MACS scaling factor:
-        #   c_i = min(|F_i|, cmax)   (Eq.3)
-        # -----------------------------------------------------------
+        # MACS scaling factor
         c_i = np.minimum(fnorm, self.base_disp_scale)
 
-        # -----------------------------------------------------------
-        # Displacement = c_i * u_i   (MACS Eq.4)
-        # -----------------------------------------------------------
-        # Clip u_i into [-1,1]^3
-        u_clipped = np.clip(action_u, -1.0, 1.0)
+        # clip policy action
+        u = np.clip(action_u, -1.0, 1.0)
 
-        disp = c_i[:, None] * u_clipped
+        # displacement
+        disp = c_i[:, None] * u
         self.disp_last = disp.copy()
 
-        # Move atoms with full PBC
+        # apply PBC displacement
         self.atoms.positions += disp
 
-        # -----------------------------------------------------------
-        # New forces after displacement
-        # -----------------------------------------------------------
+        # compute new forces
         new_F = self.atoms.get_forces().astype(np.float32)
         new_norm = np.linalg.norm(new_F, axis=1)
 
 
-        # ===========================================================
-        # Reward (MACS Eq.5):
-        #     R_i = log(|F_i^t|) - log(|F_i^{t+1}|)
-        # ===========================================================
+        ###############################################################
+        # Reward: Δlog|F|
+        ###############################################################
         old_norm = np.linalg.norm(F_old, axis=1)
         R = np.log(old_norm + 1e-12) - np.log(new_norm + 1e-12)
         reward_vec = np.clip(R, -5, 5).astype(np.float32)
 
 
-        # ===========================================================
-        # COM drift penalty — stops translation drift
-        # ===========================================================
+        ###############################################################
+        # COM drift penalty
+        ###############################################################
         com_new = self.atoms.positions.mean(axis=0)
-        dcom = np.linalg.norm(com_new - self.com_prev)
+        dCOM = np.linalg.norm(com_new - self.com_prev)
 
-        reward_vec -= self.com_lambda * np.tanh(4.0 * dcom)
+        reward_vec -= self.com_lambda * np.tanh(4.0 * dCOM)
         self.com_prev = com_new.copy()
 
-        # COM termination
-        if dcom > self.com_threshold:
+        # terminate on COM blowup
+        if dCOM > self.com_threshold:
             self.F_prev = new_F.copy()
             self.forces = new_F
             return self._obs(), reward_vec, True, "com", 0.0, float(new_norm.max())
 
 
-        # ===========================================================
-        # Bond break termination — PBC aware
-        # ===========================================================
+        ###############################################################
+        # Bond-break termination (PBC-aware)
+        ###############################################################
         for idx, (i, j) in enumerate(self.bond_pairs):
             v = self._pbc_vec(i, j)
             d = np.linalg.norm(v)
+
             ratio = d / self.bond_d0[idx]
 
             if ratio > self.bond_break_ratio:
@@ -507,9 +483,9 @@ class MOFEnv:
                 return self._obs(), reward_vec, True, "bond", 0.0, float(new_norm.max())
 
 
-        # ===========================================================
-        # Fmax convergence check
-        # ===========================================================
+        ###############################################################
+        # Fmax convergence
+        ###############################################################
         Fmax = float(new_norm.max())
         if Fmax < self.fmax_threshold:
             self.F_prev = new_F.copy()
@@ -517,20 +493,19 @@ class MOFEnv:
             return self._obs(), reward_vec, True, "fmax", 0.0, Fmax
 
 
-        # ===========================================================
-        # Max-step termination
-        # ===========================================================
+        ###############################################################
+        # max-step termination
+        ###############################################################
         if self.step_count >= self.max_steps:
             self.F_prev = new_F.copy()
             self.forces = new_F
             return self._obs(), reward_vec, True, "max_steps", 0.0, Fmax
 
 
-        # ===========================================================
-        # Normal transition
-        # ===========================================================
+        ###############################################################
+        # normal transition
+        ###############################################################
         self.F_prev = new_F.copy()
         self.forces = new_F
 
         return self._obs(), reward_vec, False, None, 0.0, Fmax
-
