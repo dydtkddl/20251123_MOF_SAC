@@ -1,7 +1,7 @@
 ##############################################
 # train_mof_multi_env.py  
 # Per-Atom RL version (MACS-style)
-# Full Logging + XYZ Dump + Curriculum Horizon
+# Stable SAC + Warm-up + Reward Clipping + Update Frequency
 ##############################################
 
 import os
@@ -90,7 +90,7 @@ FINAL_STEPS  = 1000
 HORIZON_SCH  = 500
 
 FMAX_THRESH  = 0.05
-BUFFER_SIZE  = 5_000_000
+BUFFER_SIZE  = 200_000          # ★ smaller buffer for stable RL
 BATCH_SIZE   = 256
 
 CHECKPOINT_INTERVAL = 5
@@ -100,7 +100,7 @@ CHECKPOINT_INTERVAL = 5
 # GLOBALS
 ##############################################
 OBS_DIM = None
-ACT_DIM = 3   # ALWAYS 3 for per-atom action
+ACT_DIM = 3   # per-atom action = 3-dim
 replay = None
 agent = None
 
@@ -131,7 +131,7 @@ for ep in range(EPOCHS):
     os.makedirs(snap_dir, exist_ok=True)
 
     traj_path = os.path.join(snap_dir, "traj.xyz")
-    en_path = os.path.join(snap_dir, "energies.txt")
+    en_path   = os.path.join(snap_dir, "energies.txt")
 
     if os.path.exists(traj_path): os.remove(traj_path)
     if os.path.exists(en_path): os.remove(en_path)
@@ -155,18 +155,21 @@ for ep in range(EPOCHS):
     logger.info(f"[EP {ep}] CIF loaded: {cif}")
 
     N_atom = env.N
-    obs_dim = obs.shape[1]   # per-atom feature dim
+    obs_dim = obs.shape[1]
 
     ##################################
     # EP0: Initialize Replay + Agent
     ##################################
     if ep == 0:
         OBS_DIM = obs_dim
+
         logger.info(f"[INIT] OBS_DIM={OBS_DIM}, ACT_DIM=3 (per-atom)")
 
         replay = ReplayBuffer(
             obs_dim=OBS_DIM,
-            max_size=BUFFER_SIZE
+            max_size=BUFFER_SIZE,
+            reward_weight=2.0,
+            warmup=10_000,
         )
 
         agent = SACAgent(
@@ -178,6 +181,8 @@ for ep in range(EPOCHS):
             gamma=0.995,
             tau=5e-3,
             batch_size=BATCH_SIZE,
+            update_every=4,           # ★ update frequency
+            normalize_adv=True,
         )
         logger.info("[INIT] Agent + ReplayBuffer allocated (per-atom).")
 
@@ -192,40 +197,41 @@ for ep in range(EPOCHS):
         ########################
         # ACTION (per-atom)
         ########################
-        obs_tensor = obs  # shape = (N_atom, obs_dim)
+        action = np.zeros((N_atom, 3), float)
 
-        action_list = []
         for i in range(N_atom):
-            a = agent.act(obs_tensor[i])  # → (3,)
-            action_list.append(a)
-
-        action_arr = np.stack(action_list, axis=0)  # (N_atom, 3)
+            action[i] = agent.act(obs[i])
 
         ########################
         # STEP ENV
         ########################
-        next_obs, reward, done = env.step(action_arr)
-        # reward = per-atom reward shape (N_atom,)
+        next_obs, reward, done = env.step(action)
+
+        # ------------------------------
+        # ★ reward clipping for stability
+        # ------------------------------
+        clipped_reward = np.clip(reward, -5.0, 5.0)
 
         ########################
-        # STORE (per-atom)
+        # STORE PER-ATOM
         ########################
-        next_reward = reward.astype(np.float32)
-
         for i in range(N_atom):
             replay.store(
-                obs[i],            # (obs_dim,)
-                action_arr[i],     # (3,)
-                next_reward[i],    # scalar
-                next_obs[i],       # (obs_dim,)
+                obs[i],
+                action[i],
+                clipped_reward[i],
+                next_obs[i],
                 done,
             )
 
-        if len(replay) > agent.batch_size:
+        ########################
+        # UPDATE SAC (after warm-up)
+        ########################
+        if replay.ready():
             agent.update()
 
         ########################
-        # LOG & SAVE TRAJECTORY
+        # TRAJECTORY SAVE
         ########################
         env.atoms.write(traj_path, append=True)
 
@@ -241,12 +247,12 @@ for ep in range(EPOCHS):
             f"[EP {ep}][STEP {step}] "
             f"N={N_atom} | "
             f"Favg={np.mean(f_norm):.6f} Fmax={np.max(f_norm):.6f} "
-            f"rew_mean={float(np.mean(next_reward)):.6f} | "
+            f"rew_mean={float(np.mean(clipped_reward)):.6f} | "
             f"replay={len(replay):,} | "
             f"alpha={float(agent.alpha):.5f}"
         )
 
-        ep_ret += float(np.mean(next_reward))
+        ep_ret += float(np.mean(clipped_reward))
         obs = next_obs
 
         if done:
