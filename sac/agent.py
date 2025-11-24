@@ -10,9 +10,10 @@ from .critic import CriticQ, CriticV
 class SACAgent:
     """
     Upgraded per-atom SAC agent:
-    - Supports N-step return (via ReplayBuffer)
-    - Supports PER importance sampling weights
-    - Stable target value updates
+    - PER (TD-error priority)
+    - N-step return (via ReplayBuffer)
+    - PER importance sampling weights
+    - Temperature α clamp for stability
     """
 
     def __init__(
@@ -25,7 +26,7 @@ class SACAgent:
         tau=5e-3,
         batch_size=256,
         lr=3e-4,
-        n_step=3
+        n_step=1
     ):
 
         self.replay = replay_buffer
@@ -33,7 +34,7 @@ class SACAgent:
 
         self.device = torch.device(device if torch.cuda.is_available() else "cpu")
 
-        # n-step discount
+        # n-step discount (n_step=1 strongly recommended for structure optimization)
         self.n_step = n_step
         self.gamma = gamma
         self.gamma_n = gamma ** n_step
@@ -41,7 +42,7 @@ class SACAgent:
         self.tau = tau
 
         # ---------------------------
-        # NETWORKS (FP32)
+        # NETWORKS
         # ---------------------------
         self.actor = Actor(obs_dim, act_dim).to(self.device).float()
         self.v = CriticV(obs_dim).to(self.device).float()
@@ -60,7 +61,7 @@ class SACAgent:
         self.q2_opt = optim.Adam(self.q2.parameters(), lr=lr)
 
         # ---------------------------
-        # ENTROPY (TARGET = -1)
+        # SAC entropy temperature α
         # ---------------------------
         self.target_entropy = -1.0
         self.log_alpha = torch.zeros(1, requires_grad=True, device=self.device)
@@ -75,8 +76,6 @@ class SACAgent:
 
 
     # -------------------------------------------------------------
-    # ACTION SELECTION
-    # -------------------------------------------------------------
     @torch.no_grad()
     def act(self, obs):
         obs = torch.as_tensor(obs, dtype=torch.float32, device=self.device)
@@ -85,7 +84,7 @@ class SACAgent:
 
 
     # -------------------------------------------------------------
-    # UPDATE SAC (PER + N-step)
+    # UPDATE SAC (with PER + TD-error priority update)
     # -------------------------------------------------------------
     def update(self):
 
@@ -97,12 +96,11 @@ class SACAgent:
         nobs  = torch.as_tensor(batch["nobs"], dtype=torch.float32, device=self.device)
         done  = torch.as_tensor(batch["done"], dtype=torch.float32, device=self.device).unsqueeze(1)
 
-        # PER importance weights
         weights = torch.as_tensor(batch["weights"], dtype=torch.float32, device=self.device).unsqueeze(1)
-        idxs = batch["idx"]  # for priority update later
+        idxs = batch["idx"]
 
         ###############################################################
-        # α update
+        # α update (entropy temperature)
         ###############################################################
         new_action, logp, _, _ = self.actor(obs)
         alpha_loss = -(self.log_alpha * (logp + self.target_entropy).detach()).mean()
@@ -111,9 +109,13 @@ class SACAgent:
         alpha_loss.backward()
         self.alpha_opt.step()
 
+        # ★ temperature clamp → structure optimization 안정화
+        with torch.no_grad():
+            self.log_alpha.data.clamp_(min=-4.0, max=-1.0)
+
 
         ###############################################################
-        # Q update (PER weighted + n-step TD target)
+        # Q update (TD target)
         ###############################################################
         with torch.no_grad():
             v_next = self.v_tgt(nobs)
@@ -136,7 +138,7 @@ class SACAgent:
         q2_loss.backward()
         self.q2_opt.step()
 
-        # priority update (PER)
+        # ★ PER TD-error priority update
         with torch.no_grad():
             new_priority = (td1.abs() + td2.abs()).cpu().numpy().flatten()
             for i, p in zip(idxs, new_priority):
@@ -144,7 +146,7 @@ class SACAgent:
 
 
         ###############################################################
-        # V update (PER weighted)
+        # V update
         ###############################################################
         v_pred = self.v(obs)
 
@@ -185,12 +187,8 @@ class SACAgent:
 
             self.soft_update()
 
-
         self.total_steps += 1
 
-        ###############################################################
-        # return all losses for optional logging
-        ###############################################################
         return {
             "policy_loss": float(policy_loss) if policy_loss is not None else None,
             "q1_loss": float(q1_loss),

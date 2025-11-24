@@ -160,6 +160,7 @@ class MOFEnv:
         self.bond_pairs, self.bond_d0 = self._detect_true_bonds(self.atoms)
         print(f"[INIT] Detected true bonds = {len(self.bond_pairs)}")
 
+        # adjacency
         self.adj = {i:[] for i in range(self.N)}
         for a, b in self.bond_pairs:
             self.adj[a].append(b)
@@ -341,9 +342,9 @@ class MOFEnv:
         self.step_count += 1
         action = np.clip(action, -1.0, 1.0)
 
-        # -----------------------------
+        # --------------------------------------
         # 1) Force-adaptive displacement
-        # -----------------------------
+        # --------------------------------------
         gnorm = np.linalg.norm(self.forces, axis=1)
         scale = np.minimum(gnorm, self.cmax).reshape(-1, 1)
 
@@ -354,15 +355,15 @@ class MOFEnv:
         old_norm = np.maximum(np.linalg.norm(self.forces, axis=1), 1e-12)
         new_norm = np.maximum(np.linalg.norm(new_forces, axis=1), 1e-12)
 
-        # -----------------------------
-        # 2) Force reward
-        # -----------------------------
+        # --------------------------------------
+        # 2) Force reward  (×10 scaling 적용됨)
+        # --------------------------------------
         r_f = 10.0 * (np.log(old_norm+1e-6) - np.log(new_norm+1e-6))
         reward = r_f.copy()
 
-        # -----------------------------
+        # --------------------------------------
         # 3) COM penalty
-        # -----------------------------
+        # --------------------------------------
         COM_new = self.atoms.positions.mean(axis=0)
         delta_COM = np.linalg.norm(COM_new - self.COM_prev)
 
@@ -372,9 +373,9 @@ class MOFEnv:
         if delta_COM > self.com_threshold:
             return self._obs(), reward, True, "com"
 
-        # -----------------------------
+        # --------------------------------------
         # 4) Bond penalty
-        # -----------------------------
+        # --------------------------------------
         for idx, (a, b) in enumerate(self.bond_pairs):
 
             rel = self._rel_vec(a, b)
@@ -393,9 +394,9 @@ class MOFEnv:
             if ratio > 6.0 or ratio < 0.25:
                 return self._obs(), reward, True, "bond"
 
-        # -----------------------------
+        # --------------------------------------
         # 5) Termination conditions
-        # -----------------------------
+        # --------------------------------------
         if np.mean(new_norm) < self.fmax_threshold:
             self._update_memory(disp, new_forces)
             return self._obs(), reward, True, "fmax"
@@ -404,9 +405,9 @@ class MOFEnv:
             self._update_memory(disp, new_forces)
             return self._obs(), reward, True, "max_steps"
 
-        # -----------------------------
+        # --------------------------------------
         # Normal update
-        # -----------------------------
+        # --------------------------------------
         self._update_memory(disp, new_forces)
         return self._obs(), reward, False, None
 

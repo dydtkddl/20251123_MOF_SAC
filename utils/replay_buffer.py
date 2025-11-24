@@ -5,50 +5,35 @@ from collections import deque
 
 class ReplayBuffer:
     """
-    Final Upgraded ReplayBuffer for MACS–MOF RL
-    ==========================================================
-    Features:
+    Final Upgraded ReplayBuffer for MACS–MOF:
     - PER (Prioritized Experience Replay)
-    - Sliding window (keep recent MAX only)
+    - TD-error priority update
     - Episode-balanced sampling
-    - N-step return
-    - reward-based priority
-    - episode-level discard (COM/bond termination)
-    ==========================================================
-    Stores *per-atom transitions*:
-        obs       (obs_dim,)
-        act       (3,)
-        reward    float
-        next_obs  (obs_dim,)
-        done      bool
-        priority  float
+    - Sliding-window maintenance
+    - N-step return (default 1)
     """
 
     def __init__(
         self,
         obs_dim,
         max_size=2_000_000,
-        alpha=0.6,      # PER exponent
-        beta=0.4,       # PER IS weight exponent
-        n_step=3,
-        gamma=0.995,
+        alpha=0.6,
+        beta=0.4,
+        n_step=1,
+        gamma=0.995
     ):
         self.obs_dim = obs_dim
         self.act_dim = 3
 
-        # sliding window
         self.max_size = max_size
 
-        # PER
         self.alpha = alpha
         self.beta = beta
 
-        # N-step
         self.n_step = n_step
         self.gamma = gamma
         self.n_queue = deque(maxlen=n_step)
 
-        # flat memory
         self.obs_buf = np.zeros((max_size, obs_dim), np.float32)
         self.nobs_buf = np.zeros((max_size, obs_dim), np.float32)
         self.act_buf = np.zeros((max_size, 3), np.float32)
@@ -60,41 +45,35 @@ class ReplayBuffer:
         self.ptr = 0
         self.size = 0
 
-        # episode tracking
         self.ep_counter = 0
         self.current_ep_indices = []
-        self.episode_track = []      # list of lists
+        self.episode_track = []
 
-    # ==========================================================
-    # EPISODE CONTROL
-    # ==========================================================
+
+    # ----------------------------------------------------------
     def new_episode(self):
-        """Call this at EP start."""
         self.ep_counter += 1
         self.current_ep_indices = []
         self.n_queue.clear()
 
-    def end_episode(self, keep: bool = True):
-        """Keep=False → discard by zeroing priority."""
+
+    def end_episode(self, keep=True):
         if not keep:
             for idx in self.current_ep_indices:
                 self.prior_buf[idx] = 0.0
             self.current_ep_indices = []
             return
 
-        # valid ep
         if len(self.current_ep_indices) > 0:
             self.episode_track.append(list(self.current_ep_indices))
         self.current_ep_indices = []
 
-    # ==========================================================
-    # N-step helper
-    # ==========================================================
+
+    # ----------------------------------------------------------
+    # N-step converter
+    # ----------------------------------------------------------
     def _convert_n_step(self, s, a, r, ns, d):
-        """
-        Convert to n-step transition.
-        Returns None until queue is filled.
-        """
+
         self.n_queue.append((s, a, r, ns, d))
 
         if len(self.n_queue) < self.n_step:
@@ -111,13 +90,9 @@ class ReplayBuffer:
 
         return s0, a0, R, ns_n, d_n
 
-    # ==========================================================
-    # STORE
-    # ==========================================================
+
+    # ----------------------------------------------------------
     def store(self, s, a, r, ns, d):
-        """
-        Add transition using n-step conversion + assign priority.
-        """
 
         nstep = self._convert_n_step(s, a, r, ns, d)
         if nstep is None:
@@ -133,7 +108,7 @@ class ReplayBuffer:
         self.nobs_buf[idx] = ns_n
         self.done_buf[idx] = d_n
 
-        # reward-based priority
+        # default initial priority (reward-based)
         self.prior_buf[idx] = abs(float(Rn)) + 1e-6
 
         self.current_ep_indices.append(idx)
@@ -141,34 +116,17 @@ class ReplayBuffer:
         self.ptr = (self.ptr + 1) % self.max_size
         self.size = min(self.size + 1, self.max_size)
 
-    # ==========================================================
-    # Sliding window clean
-    # ==========================================================
-    def _sliding_window_cleanup(self):
-        if self.size < self.max_size:
-            return
 
-        # remove low priority transitions
-        remove_n = 200_000
-        lowest = np.argsort(self.prior_buf)[:remove_n]
-        for idx in lowest:
-            self.prior_buf[idx] = 0.0
-
-    # ==========================================================
-    # SAMPLE
-    # ==========================================================
+    # ----------------------------------------------------------
+    # EPISODE-BALANCED PER SAMPLING
+    # ----------------------------------------------------------
     def sample(self, batch_size):
-        """
-        Episode-balanced + PER sampling
-        """
 
         if len(self.episode_track) == 0:
-            # fallback random sample
             ids = np.random.randint(0, self.size, batch_size)
             w = np.ones(batch_size, np.float32)
             return self._package(ids, w)
 
-        # choose episodes uniformly
         chosen_eps = random.sample(
             self.episode_track,
             k=min(len(self.episode_track), batch_size)
@@ -186,7 +144,6 @@ class ReplayBuffer:
             pick = np.random.choice(ep_idxs, p=probs)
             indices.append(pick)
 
-        # fill if needed
         if len(indices) < batch_size:
             remain = batch_size - len(indices)
             extra = np.random.randint(0, self.size, remain)
@@ -194,7 +151,6 @@ class ReplayBuffer:
 
         indices = np.array(indices[:batch_size])
 
-        # PER IS weights
         prios = self.prior_buf[indices]
         probs = prios / prios.sum()
         weights = (len(self.prior_buf) * probs) ** (-self.beta)
@@ -202,23 +158,24 @@ class ReplayBuffer:
 
         return self._package(indices, weights.astype(np.float32))
 
-    # ==========================================================
-    def _package(self, indices, weights):
-        """Return dict batch."""
+
+    # ----------------------------------------------------------
+    def _package(self, ids, weights):
         return dict(
-            obs=self.obs_buf[indices],
-            act=self.act_buf[indices],
-            rew=self.rew_buf[indices],
-            nobs=self.nobs_buf[indices],
-            done=self.done_buf[indices],
+            obs=self.obs_buf[ids],
+            act=self.act_buf[ids],
+            rew=self.rew_buf[ids],
+            nobs=self.nobs_buf[ids],
+            done=self.done_buf[ids],
             weights=weights,
-            idx=indices,
+            idx=ids,
         )
 
-    # ==========================================================
+
+    # ----------------------------------------------------------
     def update_priority(self, idx, td_err):
-        """Agent can update priority after TD-error."""
         self.prior_buf[idx] = abs(float(td_err)) + 1e-6
+
 
     def __len__(self):
         return self.size

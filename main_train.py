@@ -2,7 +2,7 @@
 # train_mof_multi_env.py  
 # Per-Atom RL version (MACS-style)
 # Full Logging + XYZ Dump + Curriculum Horizon
-# Episode-Level Buffer + Bad Termination Discard
+# Episode-Level Buffer + Bad Termination Discard (EP < 500 완화)
 ##############################################
 
 import os
@@ -166,6 +166,7 @@ for ep in range(EPOCHS):
         OBS_DIM = obs_dim
         logger.info(f"[INIT] OBS_DIM={OBS_DIM}, ACT_DIM=3 (per-atom)")
 
+        # n-step=1 설정은 ReplayBuffer 내부에서 이미 처리됨
         replay = ReplayBuffer(
             obs_dim=OBS_DIM,
             max_size=BUFFER_SIZE
@@ -186,7 +187,7 @@ for ep in range(EPOCHS):
 
 
     ##################################
-    # EPISODE
+    # EPISODE LOOP
     ##################################
     ep_ret = 0.0
     episode_buffer = []
@@ -195,39 +196,36 @@ for ep in range(EPOCHS):
 
     for step in tqdm(range(max_steps), desc=f"[EP {ep}]", ncols=120):
 
-        ########################
-        # ACTION (per-atom)
-        ########################
-        obs_tensor = obs
+        # ---------------------------------------------------
+        # ACTION (per atom)
+        # ---------------------------------------------------
         action_list = []
         for i in range(N_atom):
-            a = agent.act(obs_tensor[i])
-            action_list.append(a)
-
+            action_list.append(agent.act(obs[i]))
         action_arr = np.stack(action_list, axis=0)
 
-        ########################
+        # ---------------------------------------------------
         # STEP ENV
-        ########################
+        # ---------------------------------------------------
         next_obs, reward, done, done_reason = env.step(action_arr)
+        reward = reward.astype(np.float32)
 
-        next_reward = reward.astype(np.float32)
-
-        # EPISODE BUFFER STORE
+        # ---------------------------------------------------
+        # EP BUFFER LOCAL STORE
+        # ---------------------------------------------------
         for i in range(N_atom):
             episode_buffer.append((
                 obs[i].copy(),
                 action_arr[i].copy(),
-                next_reward[i],
+                reward[i],
                 next_obs[i].copy(),
                 done,
             ))
 
-        ########################
-        # TRAJECTORY SAVE
-        ########################
+        # save XYZ trajectory
         env.atoms.write(traj_path, append=True)
 
+        # energy log
         Etot = env.atoms.get_potential_energy()
         E_pa = Etot / N_atom
         with open(en_path, "a") as f:
@@ -239,12 +237,12 @@ for ep in range(EPOCHS):
             f"[EP {ep}][STEP {step}] "
             f"N={N_atom} | "
             f"Favg={np.mean(f_norm):.6f} Fmax={np.max(f_norm):.6f} "
-            f"rew_mean={float(np.mean(next_reward)):.6f} | "
+            f"rew_mean={float(np.mean(reward)):.6f} | "
             f"ep_buf={len(episode_buffer):,} | "
             f"alpha={float(agent.alpha):.5f}"
         )
 
-        ep_ret += float(np.mean(next_reward))
+        ep_ret += float(np.mean(reward))
         obs = next_obs
 
         if done:
@@ -253,18 +251,25 @@ for ep in range(EPOCHS):
 
 
     ##################################
-    # EP END
+    # EPISODE END
     ##################################
     logger.info(f"[EP {ep}] return={ep_ret:.6f}")
 
     BAD_TERMINATIONS = ["com", "bond"]
 
-    if done_reason in BAD_TERMINATIONS:
-        logger.info(f"[EP {ep}] BAD termination ({done_reason}) => discard episode transitions")
+    # ==========================================================
+    # **개선 4: Bad episode 완화**
+    # ep < 500 이면 bad episode도 저장
+    # ==========================================================
+    keep_bad_episode = (ep < 500)
+
+    if done_reason in BAD_TERMINATIONS and not keep_bad_episode:
+        logger.info(f"[EP {ep}] BAD termination => discard episode")
     else:
-        logger.info(f"[EP {ep}] GOOD episode => storing {len(episode_buffer):,} transitions")
+        logger.info(f"[EP {ep}] storing transitions = {len(episode_buffer):,}")
         for (s, a, r, ns, d) in episode_buffer:
             replay.store(s, a, r, ns, d)
+
 
     logger.info(f"[EP {ep}] replay_size={len(replay):,}")
 
