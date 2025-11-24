@@ -158,7 +158,7 @@ for ep in range(EPOCHS):
         k_neighbors=12,
         fmax_threshold=FMAX_THRESH,
         max_steps=max_steps,
-        cmax=0.003,
+        cmax=0.03,
     )
 
     obs = env.reset()

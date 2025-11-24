@@ -342,7 +342,7 @@ class MOFEnv:
         # ============================================================
         # ★ displacement scale drastically reduced (0.003)
         # ============================================================
-        disp =  action
+        disp = 0.003* action
 
         self.atoms.positions += disp
         new_forces = self.atoms.get_forces()
