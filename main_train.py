@@ -1,7 +1,7 @@
 ##############################
 # train_mof_multi_env.py  
 # Multi-ENV + Curriculum Horizon + Full Logging + XYZ trajectory dump
-# ★ per-structure RL + dynamic padding (stable reshape-safe version)
+# ★ per-structure RL + dynamic padding + reshape-safe version
 ##############################
 
 import os
@@ -97,22 +97,17 @@ CHECKPOINT_INTERVAL = 5
 
 
 ############################################################
-# TRAIN LOOP
+# GLOBALS (set at EP0)
 ############################################################
-logger.info(f"[MACS-MOF] Training start (EPOCHS={EPOCHS})")
-global_start = time.time()
-
+OBS_DIM = None
+ACT_DIM = None
 replay = None
 agent = None
 
-# will be set at EP0
-OBS_DIM = None
-ACT_DIM = None
 
-
-########################################################
-# Pad/Trunc function (used everywhere)
-########################################################
+############################################################
+# Pad/Trunc
+############################################################
 def pad_or_trunc(vec, target_len):
     L = vec.shape[0]
     if L < target_len:
@@ -123,35 +118,39 @@ def pad_or_trunc(vec, target_len):
 
 
 ############################################################
-# MAIN TRAIN LOOP
+# TRAIN
 ############################################################
+logger.info(f"[MACS-MOF] Training start (EPOCHS={EPOCHS})")
+global_start = time.time()
+
+
 for ep in range(EPOCHS):
 
     logger.info("\n" + "="*80)
     logger.info(f"[EP {ep}] START")
 
-    # ------------------------------------------------------
-    # Curriculum: increase horizon
-    # ------------------------------------------------------
+    #####################################################################
+    # Curriculum Horizon
+    #####################################################################
     ratio = min(ep / HORIZON_SCH, 1.0)
     max_steps = int(BASE_STEPS + (FINAL_STEPS - BASE_STEPS) * ratio)
     logger.info(f"[EP {ep}] max_steps = {max_steps}")
 
-    # ------------------------------------------------------
-    # Snapshot folders
-    # ------------------------------------------------------
+    #####################################################################
+    # Snapshot
+    #####################################################################
     snap_dir = f"snapshots/EP{ep:04d}"
     os.makedirs(snap_dir, exist_ok=True)
 
-    traj_path = os.path.join(sap_dir, "traj.xyz")
+    traj_path = os.path.join(snap_dir, "traj.xyz")
     energy_path = os.path.join(snap_dir, "energies.txt")
 
     if os.path.exists(traj_path): os.remove(traj_path)
     if os.path.exists(energy_path): os.remove(energy_path)
 
-    # ------------------------------------------------------
-    # Load CIF + init ENV
-    # ------------------------------------------------------
+    #####################################################################
+    # Load CIF
+    #####################################################################
     cif = sample_cif()
     atoms = read(cif)
     atoms.calc = calc
@@ -173,20 +172,16 @@ for ep in range(EPOCHS):
     raw_obs_dim = N_atom * single_obs_dim
     raw_act_dim = N_atom * 3
 
-    # -----------------------------
-    # EP0: allocate agent + buffer
-    # -----------------------------
+    #####################################################################
+    # INIT agent at EP0
+    #####################################################################
     if ep == 0:
         OBS_DIM = raw_obs_dim
         ACT_DIM = raw_act_dim
 
-        logger.info(f"[INIT] OBS_DIM={OBS_DIM:,}, ACT_DIM={ACT_DIM:,}")
+        logger.info(f"[INIT] OBS_DIM={OBS_DIM}, ACT_DIM={ACT_DIM}")
 
-        replay = ReplayBuffer(
-            obs_dim=OBS_DIM,
-            act_dim=ACT_DIM,
-            max_size=BUFFER_SIZE
-        )
+        replay = ReplayBuffer(obs_dim=OBS_DIM, act_dim=ACT_DIM, max_size=BUFFER_SIZE)
 
         agent = SACAgent(
             obs_dim=OBS_DIM,
@@ -202,52 +197,53 @@ for ep in range(EPOCHS):
         logger.info("[INIT] Agent + ReplayBuffer allocated.")
 
 
-    ############################################################
+    #####################################################################
     # EPISODE LOOP
-    ############################################################
+    #####################################################################
     ep_ret = 0.0
 
     for step in tqdm(range(max_steps), desc=f"[EP {ep}]", ncols=120):
 
-        # --------------------------------------------------
-        # Flatten obs and pad/trunc to OBS_DIM
-        # --------------------------------------------------
+        ########################################################
+        # OBS
+        ########################################################
         obs_flat_raw = obs.reshape(-1)
         obs_flat = pad_or_trunc(obs_flat_raw, OBS_DIM)
 
-        # --------------------------------------------------
-        # ACTION — pad/trunc and then crop to true N_atom*3
-        # --------------------------------------------------
+        ########################################################
+        # ACTION from SAC
+        ########################################################
         act_flat_raw = agent.act(obs_flat)
         act_flat = pad_or_trunc(act_flat_raw, ACT_DIM)
 
-        # 🔥 핵심 수정: reshape 오류 방지
-        real_act = act_flat[: env.N * 3].reshape(env.N, 3)
+        ########################################################
+        # 🔥 reshape-safe action (critical)
+        ########################################################
+        need = env.N * 3
+        if act_flat.shape[0] < need:
+            act_flat = np.concatenate([act_flat, np.zeros(need - act_flat.shape[0])])
+        else:
+            act_flat = act_flat[:need]
 
-        # --------------------------------------------------
-        # ENV STEP
-        # --------------------------------------------------
+        real_act = act_flat.reshape(env.N, 3)
+
+        ########################################################
+        # STEP
+        ########################################################
         next_obs, rew, done = env.step(real_act)
 
-        # structure-level reward
         global_rew = float(np.mean(rew))
 
-        # --------------------------------------------------
+        ########################################################
         # next obs flatten
-        # --------------------------------------------------
+        ########################################################
         next_obs_flat_raw = next_obs.reshape(-1)
         next_obs_flat = pad_or_trunc(next_obs_flat_raw, OBS_DIM)
 
-        # --------------------------------------------------
-        # STORE TRANSITION
-        # --------------------------------------------------
-        replay.store(
-            obs_flat,
-            act_flat,
-            global_rew,
-            next_obs_flat,
-            done
-        )
+        ########################################################
+        # store
+        ########################################################
+        replay.store(obs_flat, act_flat, global_rew, next_obs_flat, done)
 
         if len(replay) > agent.batch_size:
             agent.update()
@@ -255,9 +251,9 @@ for ep in range(EPOCHS):
         obs = next_obs
         ep_ret += global_rew
 
-        # --------------------------------------------------
-        # Save trajectory + energies
-        # --------------------------------------------------
+        ########################################################
+        # save xyz + energies
+        ########################################################
         env.atoms.write(traj_path, append=True)
 
         E_total = env.atoms.get_potential_energy()
@@ -265,15 +261,15 @@ for ep in range(EPOCHS):
         with open(energy_path, "a") as f:
             f.write(f"{step} {E_total:.8f} {E_pa:.8f}\n")
 
-        # --------------------------------------------------
-        # Step Logging
-        # --------------------------------------------------
-        f = np.linalg.norm(env.forces, axis=1)
+        ########################################################
+        # LOG
+        ########################################################
+        f_norm = np.linalg.norm(env.forces, axis=1)
 
         logger.info(
             f"[EP {ep}][STEP {step}] "
             f"Natom={env.N} | "
-            f"Favg={np.mean(f):.6f} Fmax={np.max(f):.6f} "
+            f"Favg={np.mean(f_norm):.6f} Fmax={np.max(f_norm):.6f} "
             f"rew={global_rew:.6f} "
             f"| replay={len(replay):,} "
             f"| alpha={float(agent.alpha):.6f}"
@@ -283,9 +279,9 @@ for ep in range(EPOCHS):
             logger.info(f"[EP {ep}] terminated early at step={step}")
             break
 
-    # ------------------------------------------------------
-    # EPISODE END
-    # ------------------------------------------------------
+    #####################################################################
+    # EP END
+    #####################################################################
     logger.info(f"[EP {ep}] return={ep_ret:.6f}")
     logger.info(f"[EP {ep}] replay_size={len(replay):,}")
 
@@ -294,7 +290,7 @@ for ep in range(EPOCHS):
 
 
 ############################################################
-# FINAL CHECKPOINT
+# FINAL
 ############################################################
 save_checkpoint(EPOCHS, agent, tag="final")
 
