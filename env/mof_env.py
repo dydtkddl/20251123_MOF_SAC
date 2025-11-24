@@ -356,7 +356,7 @@ class MOFEnv:
         scale = np.minimum(gnorm, self.cmax).reshape(-1,1)
 
         # Stable displacement
-        disp = 0.3 * action * (scale / self.cmax)
+        disp = 0.003 * action * (scale / self.cmax)
 
         # apply
         self.atoms.positions += disp
