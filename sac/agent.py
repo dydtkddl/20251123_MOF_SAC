@@ -265,6 +265,7 @@ class MultiAgentSAC:
                 )
             else:
                 global_feat = global_feat.to(self.device)
+
         # ★ global_dim>0인데 global_feat=None이면, 0으로 채워서 사용
         if self.global_dim > 0 and global_feat is None:
             if obs_atom.dim() == 1:
@@ -275,23 +276,22 @@ class MultiAgentSAC:
                 (batch_n, self.global_dim), dtype=torch.float32, device=self.device
             )
 
-        # Actor 호출
+        # Actor 호출 (API 분리)
         if deterministic:
-            out = self.actor(
+            # mean action 전용 helper
+            actions = self.actor.act(
                 obs_atom,
                 atom_type_id=atom_type_id,
                 global_feat=global_feat,
-                deterministic=True,
             )
         else:
-            out = self.actor(
+            # stochastic sample + logπ
+            actions, _, _, _ = self.actor(
                 obs_atom,
                 atom_type_id=atom_type_id,
                 global_feat=global_feat,
-                deterministic=False,
             )
 
-        actions, _, _, _ = out
         self.actor.train()
         return actions
 
@@ -343,7 +343,6 @@ class MultiAgentSAC:
                     (B, self.global_dim), dtype=torch.float32, device=self.device
                 )
             elif global_feat.shape[-1] != self.global_dim:
-                # 길이가 다르면 잘라내거나 패딩 (여기서는 자르거나 0패딩)
                 cur = global_feat.shape[-1]
                 if cur > self.global_dim:
                     global_feat = global_feat[..., : self.global_dim]
@@ -438,12 +437,11 @@ class MultiAgentSAC:
         self.critic_optimizer.zero_grad()
 
         with torch.no_grad():
-            # Next actions and log probs
+            # Next actions and log probs (stochastic sample)
             next_pi, next_logp, _, _ = self.actor(
                 next_obs,
                 atom_type_id=next_atom_type,
                 global_feat=next_global,
-                deterministic=False,
             )
 
             # Q target from target critic
@@ -497,7 +495,6 @@ class MultiAgentSAC:
             obs,
             atom_type_id=atom_type,
             global_feat=global_feat,
-            deterministic=False,
         )
         q1_pi, q2_pi = self.critic(
             obs,
