@@ -164,7 +164,6 @@ for ep in range(EPOCHS):
         max_steps=max_steps,
         k_neighbors=12,
         disp_scale=0.03,
-        hybrid_macs=True     # ← 반드시 추가 (env에서 조건 판단)
     )
 
     obs = env.reset()
