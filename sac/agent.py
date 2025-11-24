@@ -1,10 +1,5 @@
 ###############################################################
-# sac/agent.py — Hybrid-MACS Stable SAC Agent (Final Version)
-# Fully compatible with:
-#   - Dynamic obs_dim from Hybrid-MACS env
-#   - ReplayBuffer (PER + n-step + episode-aware)
-#   - actor.act_tensor()
-#   - critic networks
+# sac/agent.py — MACS 3D-Action Fully Compatible FINAL VERSION
 ###############################################################
 
 import numpy as np
@@ -16,45 +11,40 @@ from .actor import Actor
 from .critic import CriticQ, CriticV
 
 
-#######################################################################
-# SAC Agent for Hybrid-MACS (scale-action, multi-agent implicit)
-#######################################################################
 class SACAgent:
 
     def __init__(
         self,
         obs_dim,
         replay_buffer,
-        act_dim=1,
+        act_dim=3,                   # ★ MACS: 3D action
         device="cuda",
         gamma=0.995,
         tau=5e-3,
         batch_size=256,
         lr=3e-4,
         n_step=1,
-        target_entropy=-0.3
+        target_entropy=-1.0          # ★ 3D action이면 entropy target 더 낮게 가야 함
     ):
-        #############################################
-        # Device
-        #############################################
+
         self.device = torch.device(device if torch.cuda.is_available() else "cpu")
 
-        #############################################
-        # Replay Buffer
-        #############################################
+        ###############################################################
+        # Replay buffer
+        ###############################################################
         self.replay = replay_buffer
         self.batch_size = batch_size
 
-        #############################################
-        # Discount (n-step compatible)
-        #############################################
+        ###############################################################
+        # Discount
+        ###############################################################
         self.gamma = gamma
         self.n_step = n_step
-        self.gamma_n = gamma ** n_step  # for n-step TD target
+        self.gamma_n = gamma ** n_step
 
-        #############################################
+        ###############################################################
         # Networks
-        #############################################
+        ###############################################################
         self.actor = Actor(obs_dim, act_dim).to(self.device)
 
         self.q1 = CriticQ(obs_dim, act_dim).to(self.device)
@@ -62,55 +52,48 @@ class SACAgent:
 
         self.v = CriticV(obs_dim).to(self.device)
         self.v_target = CriticV(obs_dim).to(self.device)
-        self.v_target.load_state_dict(self.v.state_dict())  # initial sync
+        self.v_target.load_state_dict(self.v.state_dict())
 
-        #############################################
+        ###############################################################
         # Optimizers
-        #############################################
+        ###############################################################
         self.actor_opt = optim.Adam(self.actor.parameters(), lr=lr)
         self.q1_opt = optim.Adam(self.q1.parameters(), lr=lr)
         self.q2_opt = optim.Adam(self.q2.parameters(), lr=lr)
         self.v_opt = optim.Adam(self.v.parameters(), lr=lr)
 
-        #############################################
-        # Entropy Temperature α
-        #############################################
-        self.log_alpha = torch.zeros(1, device=self.device, requires_grad=True)
+        ###############################################################
+        # Entropy λ (α)
+        ###############################################################
+        self.log_alpha = torch.zeros(1, requires_grad=True, device=self.device)
         self.alpha_opt = optim.Adam([self.log_alpha], lr=lr)
         self.target_entropy = target_entropy
 
-        #############################################
-        # counters
-        #############################################
+        ###############################################################
         self.tau = tau
         self.total_steps = 0
 
 
-    ###################################################################
     @property
     def alpha(self):
-        """ α = exp(log_alpha) """
         return self.log_alpha.exp()
 
 
     ###################################################################
-    # Deterministic action interface for environment stepping
+    # Deterministic action for env (3D vector)
     ###################################################################
     @torch.no_grad()
     def act(self, obs):
-        """
-        obs: numpy (1D or 2D) → return scale in [0, 1]
-        Uses actor.act_tensor() for consistency.
-        """
         if obs.ndim == 1:
-            obs = obs[np.newaxis, :]
+            obs = obs[None, :]
 
         obs_t = torch.as_tensor(obs, dtype=torch.float32, device=self.device)
-        return self.actor.act_tensor(obs_t)  # → (N_atom, 1)
+        action3d = self.actor.act_tensor(obs_t)  # → (3,) vector
+        return action3d
 
 
     ###################################################################
-    # SAC UPDATE
+    # SAC Update
     ###################################################################
     def update(self):
 
@@ -126,51 +109,45 @@ class SACAgent:
         idxs = batch["idx"]
 
         ###############################################################
-        # 1. α update (entropy temperature)
+        # 1) α update
         ###############################################################
-        scale_s, logp_s, _, _ = self.actor(obs)
+        a_sample, logp_a, _, _ = self.actor(obs)
 
-        alpha_loss = -(self.log_alpha * (logp_s + self.target_entropy).detach()).mean()
+        alpha_loss = -(self.log_alpha * (logp_a + self.target_entropy).detach()).mean()
 
         self.alpha_opt.zero_grad()
         alpha_loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.alpha_opt.param_groups[0]["params"], 0.5)
         self.alpha_opt.step()
 
-        # clamp alpha for stability
         with torch.no_grad():
-            self.log_alpha.data.clamp_(min=-4.0, max=-1.2)
+            self.log_alpha.clamp_(min=-4.0, max=0.0)
 
 
         ###############################################################
-        # 2. Q1, Q2 Update
+        # 2) Update Q networks
         ###############################################################
         with torch.no_grad():
             v_next = self.v_target(nobs)
-            q_target = rew + (1 - done) * self.gamma_n * v_next
+            q_backup = rew + (1 - done) * self.gamma_n * v_next
 
         q1_pred = self.q1(obs, act)
         q2_pred = self.q2(obs, act)
 
-        td1 = q1_pred - q_target
-        td2 = q2_pred - q_target
+        td1 = q1_pred - q_backup
+        td2 = q2_pred - q_backup
 
-        q1_loss = (weights * td1.pow(2)).mean()
-        q2_loss = (weights * td2.pow(2)).mean()
+        q1_loss = (weights * (td1 ** 2)).mean()
+        q2_loss = (weights * (td2 ** 2)).mean()
 
-        # Q1
         self.q1_opt.zero_grad()
         q1_loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.q1.parameters(), 0.5)
         self.q1_opt.step()
 
-        # Q2
         self.q2_opt.zero_grad()
         q2_loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.q2.parameters(), 0.5)
         self.q2_opt.step()
 
-        # PER priority update (max TD-error per sample)
+        # PER priority update
         with torch.no_grad():
             td_err = torch.max(td1.abs(), td2.abs()).cpu().numpy().flatten()
             for i, v in zip(idxs, td_err):
@@ -178,37 +155,35 @@ class SACAgent:
 
 
         ###############################################################
-        # 3. V-network Update
+        # 3) Update V network
         ###############################################################
         v_pred = self.v(obs)
 
         with torch.no_grad():
             q_min = torch.min(
-                self.q1(obs, scale_s),
-                self.q2(obs, scale_s)
+                self.q1(obs, a_sample),
+                self.q2(obs, a_sample)
             )
-            v_target = q_min - self.alpha * logp_s
+            v_target = q_min - self.alpha * logp_a
 
-        v_loss = (weights * (v_pred - v_target).pow(2)).mean()
+        v_loss = (weights * (v_pred - v_target) ** 2).mean()
 
         self.v_opt.zero_grad()
         v_loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.v.parameters(), 0.5)
         self.v_opt.step()
 
 
         ###############################################################
-        # 4. Policy Update (every 2 steps)
+        # 4) Policy Update (every 2 steps)
         ###############################################################
         policy_loss = None
-
         if self.total_steps % 2 == 0:
 
-            scale2, logp2, _, _ = self.actor(obs)
+            a_smpl2, logp2, _, _ = self.actor(obs)
 
             q_min2 = torch.min(
-                self.q1(obs, scale2),
-                self.q2(obs, scale2)
+                self.q1(obs, a_smpl2),
+                self.q2(obs, a_smpl2)
             )
 
             policy_loss = (self.alpha * logp2 - q_min2)
@@ -216,17 +191,14 @@ class SACAgent:
 
             self.actor_opt.zero_grad()
             policy_loss.backward()
-            torch.nn.utils.clip_grad_norm_(self.actor.parameters(), 0.5)
             self.actor_opt.step()
 
-            # target V-network update
             self.soft_update()
 
         self.total_steps += 1
 
-
         ###############################################################
-        # Return logs
+        # Return
         ###############################################################
         return dict(
             policy_loss=float(policy_loss) if policy_loss is not None else None,
@@ -239,7 +211,7 @@ class SACAgent:
 
 
     ###################################################################
-    # Soft Update Target Network
+    # Soft update target V
     ###################################################################
     def soft_update(self):
         with torch.no_grad():

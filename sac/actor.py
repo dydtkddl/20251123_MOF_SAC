@@ -1,5 +1,5 @@
 ###############################################################
-# sac/actor.py — FINAL FULL-STABLE VERSION
+# sac/actor.py — MACS-style 3D Gaussian Policy (FINAL VERSION)
 ###############################################################
 
 import torch
@@ -8,28 +8,27 @@ import torch.nn.functional as F
 import numpy as np
 
 
-######################################################################
-# Smooth Activation (Swish)
-######################################################################
+###############################################################
+# Swish activation (smooth MLP)
+###############################################################
 class Swish(nn.Module):
     def forward(self, x):
         return x * torch.sigmoid(x)
 
 
-######################################################################
-# Gaussian Policy → Squashed to [0, action_max]
-# + Smoothing + act_tensor() support
-######################################################################
+###############################################################
+# Actor: 3D Gaussian → Tanh squash → action vector in [-a_max, a_max]^3
+###############################################################
 class Actor(nn.Module):
 
     def __init__(
         self,
         obs_dim,
-        act_dim=1,
-        hidden_sizes=[256, 256, 128, 64],
-        log_std_min=-4.0,
+        act_dim=3,                      # ★ MACS: 3D action
+        hidden_sizes=[256, 256, 128],
+        log_std_min=-5.0,
         log_std_max=1.0,
-        action_max=0.12
+        action_max=1.0                  # ★ RL world: MACS uses u ∈ [-1,1]^3
     ):
         super().__init__()
 
@@ -40,9 +39,9 @@ class Actor(nn.Module):
         self.LOG_STD_MIN = log_std_min
         self.LOG_STD_MAX = log_std_max
 
-        # ------------------------------------------------------------
-        # Deep network backbone (LayerNorm + Swish)
-        # ------------------------------------------------------------
+        ###########################################################
+        # Backbone MLP + LayerNorm + Swish
+        ###########################################################
         layers = []
         d = obs_dim
         for h in hidden_sizes:
@@ -59,14 +58,18 @@ class Actor(nn.Module):
         self.mu_head = nn.Linear(d, act_dim)
         self.log_std_head = nn.Linear(d, act_dim)
 
-        # Action smoothing memory
+        # temporal smoothing memory
         self.prev_action = None
 
 
-    ##################################################################
-    # Forward pass: returns (action, logp, mu, std)
-    ##################################################################
+    ###############################################################
+    # Forward (training mode): returns
+    #   π(a|s) sample, logp(a|s), μ, std
+    ###############################################################
     def forward(self, obs):
+        """
+        obs: Tensor (B, obs_dim)
+        """
         if obs.dim() == 1:
             obs = obs.unsqueeze(0)
 
@@ -74,75 +77,81 @@ class Actor(nn.Module):
 
         mu = self.mu_head(h)
         log_std = self.log_std_head(h)
-
         log_std = torch.clamp(log_std, self.LOG_STD_MIN, self.LOG_STD_MAX)
         std = torch.exp(log_std)
 
-        # Reparameterization trick
+        # ---------------------------------------------------------
+        # Reparameterization Trick: raw action
+        # ---------------------------------------------------------
         eps = torch.randn_like(mu)
         raw = mu + eps * std
 
-        # Softplus-based squash into [0,1]
-        squashed = F.softplus(raw) / (1.0 + F.softplus(raw))
+        # ---------------------------------------------------------
+        # Squash with tanh (MACS style: u ∈ [-1,1]^3)
+        # ---------------------------------------------------------
+        a_tanh = torch.tanh(raw)
+        action = self.action_max * a_tanh
 
-        # Convert to [0, action_max]
-        scale = squashed * self.action_max
-
-        # ------------------------------------------------------------
-        # Log prob of Gaussian BEFORE squashing
-        # ------------------------------------------------------------
+        # ---------------------------------------------------------
+        # Compute log probability with Jacobian correction
+        # logπ(a|s) = logπ_raw(raw|s) - Σ log(1 - tanh(raw)^2)
+        # ---------------------------------------------------------
         gauss_logp = (
             -0.5 * ((raw - mu) / (std + 1e-8)) ** 2
             - log_std
             - 0.5 * np.log(2 * np.pi)
         ).sum(dim=-1, keepdim=True)
 
-        # Jacobian correction term for softplus squash
-        jac = torch.log(
-            (1.0 / (1.0 + F.softplus(raw))) *
-            (F.softplus(raw) / (1.0 + F.softplus(raw))) + 1e-10
+        # tanh squash correction term
+        squash_corr = torch.log(
+            1.0 - a_tanh.pow(2) + 1e-10
         ).sum(dim=-1, keepdim=True)
 
-        logp = gauss_logp - jac
+        logp = gauss_logp - squash_corr
 
-        return scale, logp, mu, std
+        return action, logp, mu, std
 
 
-    ##################################################################
+    ###############################################################
     # Deterministic action for evaluation (CPU)
-    ##################################################################
+    ###############################################################
     @torch.no_grad()
     def act(self, obs):
+        """
+        obs: numpy array (obs_dim,)
+        returns: numpy array (3,)  <- 3D action vector
+        """
         obs_t = torch.as_tensor(obs, dtype=torch.float32).unsqueeze(0)
-        scale, _, _, _ = self.forward(obs_t)
-        scale = scale.squeeze().cpu().numpy()
-
-        # Smoothing (critical!)
-        if self.prev_action is None:
-            self.prev_action = scale
-        else:
-            scale = 0.7 * self.prev_action + 0.3 * scale
-            self.prev_action = scale
-
-        return scale
-
-
-    ##################################################################
-    # Deterministic action for GPU tensor input (main_train.py → agent)
-    ##################################################################
-    @torch.no_grad()
-    def act_tensor(self, obs_t):
-        """
-        obs_t: already a GPU tensor of shape (1, obs_dim)
-        """
-        scale, _, _, _ = self.forward(obs_t)
-        scale = scale.squeeze()
+        action, _, _, _ = self.forward(obs_t)
+        a = action.squeeze().cpu().numpy()
 
         # smoothing
         if self.prev_action is None:
-            self.prev_action = scale
+            self.prev_action = a
         else:
-            scale = 0.7 * self.prev_action + 0.3 * scale
-            self.prev_action = scale
+            a = 0.7 * self.prev_action + 0.3 * a
+            self.prev_action = a
 
-        return scale.cpu().numpy()
+        return a
+
+
+    ###############################################################
+    # Deterministic action for GPU tensor input
+    ###############################################################
+    @torch.no_grad()
+    def act_tensor(self, obs_t):
+        """
+        obs_t: torch tensor (1, obs_dim) on GPU
+        return numpy action (3,)
+        """
+        action, _, _, _ = self.forward(obs_t)
+        a = action.squeeze()
+
+        # smoothing
+        if self.prev_action is None:
+            self.prev_action = a
+        else:
+            a = 0.7 * self.prev_action + 0.3 * a
+            self.prev_action = a
+
+        return a.detach().cpu().numpy()
