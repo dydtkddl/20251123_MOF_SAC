@@ -1,10 +1,14 @@
+###############################################################
+# sac/critic.py — FINAL FULL-STABLE VERSION
+###############################################################
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 
 ######################################################################
-# Swish Activation
+# Swish Activation (shared with actor)
 ######################################################################
 class Swish(nn.Module):
     def forward(self, x):
@@ -12,7 +16,7 @@ class Swish(nn.Module):
 
 
 ######################################################################
-# V(s)
+# V(s) — State Value Function
 ######################################################################
 class CriticV(nn.Module):
 
@@ -21,9 +25,12 @@ class CriticV(nn.Module):
 
         layers = []
         d = obs_dim
-
         for h in hidden:
-            layers += [nn.Linear(d, h), nn.LayerNorm(h), Swish()]
+            layers += [
+                nn.Linear(d, h),
+                nn.LayerNorm(h),
+                Swish()
+            ]
             d = h
 
         layers += [nn.Linear(d, 1)]
@@ -36,7 +43,7 @@ class CriticV(nn.Module):
 
 
 ######################################################################
-# Q(s,a)
+# Q(s,a) — State-Action Value Function
 ######################################################################
 class CriticQ(nn.Module):
 
@@ -44,10 +51,14 @@ class CriticQ(nn.Module):
         super().__init__()
 
         layers = []
-        d = obs_dim + act_dim
+        d = obs_dim + act_dim   # MUST concatenate in same order
 
         for h in hidden:
-            layers += [nn.Linear(d, h), nn.LayerNorm(h), Swish()]
+            layers += [
+                nn.Linear(d, h),
+                nn.LayerNorm(h),
+                Swish()
+            ]
             d = h
 
         layers += [nn.Linear(d, 1)]

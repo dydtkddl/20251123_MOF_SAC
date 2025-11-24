@@ -1,5 +1,5 @@
 ###############################################################
-# train_mof_scale_rl.py (Enhanced Monitoring Version)
+# train_mof_scale_rl.py — ULTRA-STABLE FULL VERSION
 ###############################################################
 
 import os
@@ -26,7 +26,6 @@ log_handler = RotatingFileHandler(
     maxBytes=20_000_000,
     backupCount=10,
 )
-
 log_handler.setFormatter(logging.Formatter(
     "%(asctime)s - %(levelname)s - %(message)s"
 ))
@@ -37,7 +36,7 @@ logger.addHandler(log_handler)
 
 
 ###############################################################
-# CHECKPOINT
+# CHECKPOINT SAVE
 ###############################################################
 def save_checkpoint(ep, agent, tag="auto"):
     os.makedirs("checkpoints", exist_ok=True)
@@ -48,39 +47,35 @@ def save_checkpoint(ep, agent, tag="auto"):
         "q2": agent.q2.state_dict(),
         "v": agent.v.state_dict(),
         "v_tgt": agent.v_tgt.state_dict(),
-        "log_alpha": float(agent.log_alpha.detach().cpu()),
+        "log_alpha": float(agent.log_alpha.detach().cpu())
     }
-    p = f"checkpoints/ckpt_ep{ep:04d}_{tag}.pt"
-    torch.save(ckpt, p)
-    logger.info(f"[CHECKPOINT] Saved => {p}")
+    path = f"checkpoints/ckpt_ep{ep:04d}_{tag}.pt"
+    torch.save(ckpt, path)
+    logger.info(f"[CHECKPOINT] saved => {path}")
 
 
 ###############################################################
-# CIF SAMPLING
+# CIF Sampling
 ###############################################################
 POOL_DIR = "mofs/train_pool_valid"
 
 def sample_cif():
     if not os.path.exists(POOL_DIR):
-        raise FileNotFoundError(f"[ERROR] CIF directory not found: {POOL_DIR}")
+        raise FileNotFoundError(f"POOL_DIR not found: {POOL_DIR}")
 
     cifs = [
         os.path.join(POOL_DIR, f)
         for f in os.listdir(POOL_DIR)
         if f.endswith(".cif")
     ]
-
     if len(cifs) == 0:
-        raise RuntimeError(
-            f"[ERROR] No CIF files found in {POOL_DIR}. "
-            "Add training CIFs first."
-        )
+        raise RuntimeError(f"No CIF file found in {POOL_DIR}")
 
     return np.random.choice(cifs)
 
 
 ###############################################################
-# MACE Surrogate
+# MACE Calculator
 ###############################################################
 calc = MACECalculator(
     model_paths=["mofs_v2.model"],
@@ -101,7 +96,6 @@ HORIZON_SCH   = 500
 FMAX_THRESH   = 0.05
 BUFFER_SIZE   = 2_000_000
 BATCH_SIZE    = 256
-
 CHECKPOINT_INTERVAL = 5
 
 
@@ -117,7 +111,7 @@ replay = None
 ###############################################################
 # TRAINING START
 ###############################################################
-logger.info(f"[MOF-SCALE-RL] Training start (epochs = {EPOCHS})")
+logger.info(f"=========== MOF-SCALE-RL TRAIN START (epochs={EPOCHS}) ===========")
 global_start = time.time()
 
 
@@ -127,14 +121,14 @@ for ep in range(EPOCHS):
     logger.info(f"[EP {ep}] START")
 
     ###############################################################
-    # 1. Curriculum Horizon
+    # Curriculum-based max_steps
     ###############################################################
     ratio = min(ep / HORIZON_SCH, 1.0)
     max_steps = int(BASE_STEPS + (FINAL_STEPS - BASE_STEPS) * ratio)
     logger.info(f"[EP {ep}] max_steps = {max_steps}")
 
     ###############################################################
-    # 2. Snapshot Directory
+    # Snapshot directory
     ###############################################################
     snap_dir = f"snapshots/EP{ep:04d}"
     os.makedirs(snap_dir, exist_ok=True)
@@ -142,18 +136,17 @@ for ep in range(EPOCHS):
     traj_xyz = os.path.join(snap_dir, "traj.xyz")
     energy_log = os.path.join(snap_dir, "energy.txt")
 
-    if os.path.exists(traj_xyz):
-        os.remove(traj_xyz)
-    if os.path.exists(energy_log):
-        os.remove(energy_log)
+    if os.path.exists(traj_xyz): os.remove(traj_xyz)
+    if os.path.exists(energy_log): os.remove(energy_log)
 
     ###############################################################
-    # 3. Load CIF + Env Init
+    # Load a CIF file
     ###############################################################
     cif = sample_cif()
     atoms = read(cif)
     atoms.calc = calc
-    logger.info(f"[EP {ep}] CIF loaded: {cif}")
+
+    logger.info(f"[EP {ep}] Loaded CIF: {cif}")
 
     def loader():
         a = atoms.copy()
@@ -164,20 +157,19 @@ for ep in range(EPOCHS):
         atoms_loader=loader,
         fmax_threshold=FMAX_THRESH,
         max_steps=max_steps,
-        disp_scale=0.03,
+        disp_scale=0.03
     )
 
     obs = env.reset()
-
     N_atom = env.N
     obs_dim = obs.shape[1]
 
     ###############################################################
-    # 4. First episode only
+    # Initialize agent (first episode)
     ###############################################################
     if ep == 0:
         OBS_DIM = obs_dim
-        logger.info(f"[INIT] OBS_DIM={OBS_DIM} | ACT_DIM={ACT_DIM}")
+        logger.info(f"[INIT] OBS_DIM={OBS_DIM}, ACT_DIM={ACT_DIM}")
 
         replay = ReplayBuffer(
             obs_dim=OBS_DIM,
@@ -190,7 +182,7 @@ for ep in range(EPOCHS):
 
         agent = SACAgent(
             obs_dim=OBS_DIM,
-            act_dim=1,
+            act_dim=ACT_DIM,
             replay_buffer=replay,
             device="cuda",
             lr=3e-4,
@@ -200,34 +192,41 @@ for ep in range(EPOCHS):
             n_step=1
         )
 
-        logger.info("[INIT] Agent + ReplayBuffer allocated.")
+        logger.info("[INIT] Agent + Replay buffer created.")
 
     ###############################################################
-    # 5. EPISODE
+    # Episode start
     ###############################################################
     replay.new_episode()
-
     ep_ret = 0.0
     done_reason = "none"
 
-    com_drift_cum = 0.0
-    energy_history = []
+    energy_hist = []
+    com_drift_sum = 0.0
 
-    for step in tqdm(range(max_steps), desc=f"[EP {ep}]", ncols=120):
+    tqdm_bar = tqdm(range(max_steps), desc=f"[EP {ep}]", ncols=120)
 
+    for step in tqdm_bar:
+
+        ###############################################################
+        # Compute action for each atom
+        ###############################################################
         scale_list = []
         for i in range(N_atom):
-            s = agent.act(obs[i])
+            s = agent.act(obs[i])     # obs[i] shape = (OBS_DIM,)
             scale_list.append(s)
 
-        scale_arr = np.array(scale_list, dtype=np.float32).reshape(-1, 1)
+        scale_arr = np.array(scale_list, np.float32).reshape(-1, 1)
 
-        ###########################################################
+        ###############################################################
         # ENV STEP
-        ###########################################################
+        ###############################################################
         next_obs, reward, done, done_reason, Etot, Fmax = env.step(scale_arr)
         reward = reward.astype(np.float32)
 
+        ###############################################################
+        # Logging stats
+        ###############################################################
         Fnorm = np.linalg.norm(env.forces, axis=1)
         Fmin  = float(np.min(Fnorm))
         Fmean = float(np.mean(Fnorm))
@@ -235,13 +234,13 @@ for ep in range(EPOCHS):
         Fmed  = float(np.median(Fnorm))
 
         E_avg = Etot / N_atom
-        energy_history.append(E_avg)
-        Emean_hist = float(np.mean(energy_history))
-        Estd_hist = float(np.std(energy_history))
+        energy_hist.append(E_avg)
+        Emean_hist = float(np.mean(energy_hist))
+        Estd_hist  = float(np.std(energy_hist))
 
         com_now = env.atoms.positions.mean(axis=0)
-        COM_drift_step = float(np.linalg.norm(com_now - env.com_prev))
-        com_drift_cum += COM_drift_step
+        COM_step = float(np.linalg.norm(com_now - env.com_prev))
+        com_drift_sum += COM_step
 
         disp_mag = np.linalg.norm(env.disp_last, axis=1)
         Disp_mean = float(np.mean(disp_mag))
@@ -252,32 +251,30 @@ for ep in range(EPOCHS):
         rew_min  = float(np.min(reward))
         rew_max  = float(np.max(reward))
 
-        ###########################################################
-        # STORE (per-atom)
-        ###########################################################
+        ###############################################################
+        # Replay storage (per atom)
+        ###############################################################
         for i in range(N_atom):
-            replay.store(
-                obs[i], scale_arr[i], reward[i], next_obs[i], done
-            )
+            replay.store(obs[i], scale_arr[i], reward[i], next_obs[i], done)
 
-        ###########################################################
-        # TRAJECTORY SAVE
-        ###########################################################
+        ###############################################################
+        # Save trajectory
+        ###############################################################
         env.atoms.write(traj_xyz, append=True)
         with open(energy_log, "a") as f:
             f.write(f"{step} {Etot:.8f} {E_avg:.8f}\n")
 
-        ###########################################################
-        # EXTENDED LOGGING (NEW)
-        ###########################################################
+        ###############################################################
+        # EXTENDED LOGGING
+        ###############################################################
         logger.info(
             f"[EP {ep}][STEP {step}] "
             f"N={N_atom} | "
             f"Fmax={Fmax:.3e} Fmin={Fmin:.3e} Fmean={Fmean:.3e} Fstd={Fstd:.3e} Fmed={Fmed:.3e} | "
-            f"E={Etot:.3f} E/atom={E_avg:.5f} Emean_hist={Emean_hist:.5f} Estd_hist={Estd_hist:.5f} | "
-            f"COM_step={COM_drift_step:.4f} COM_cum={com_drift_cum:.4f} | "
-            f"Disp_mean={Disp_mean:.4e} Disp_max={Disp_max:.4e} | "
-            f"rew_mean={rew_mean:.5f} rew_std={rew_std:.5f} rmin={rew_min:.5f} rmax={rew_max:.5f} | "
+            f"E={Etot:.3f} E/atom={E_avg:.6f} Emean_hist={Emean_hist:.6f} Estd_hist={Estd_hist:.6f} | "
+            f"COM_step={COM_step:.4f} COM_cum={com_drift_sum:.4f} | "
+            f"Disp_mean={Disp_mean:.3e} Disp_max={Disp_max:.3e} | "
+            f"rew_mean={rew_mean:.6f} rew_std={rew_std:.6f} rmin={rew_min:.6f} rmax={rew_max:.6f} | "
             f"alpha={float(agent.alpha):.5f} | buffer={len(replay):,}"
         )
 
@@ -285,52 +282,48 @@ for ep in range(EPOCHS):
         obs = next_obs
 
         if done:
-            logger.info(f"[EP {ep}] terminated at step={step} reason={done_reason}")
+            logger.info(f"[EP {ep}] TERMINATED at step={step}, reason={done_reason}")
             break
 
-
     ###############################################################
-    # 6. EP END
+    # Episode END
     ###############################################################
     logger.info(f"[EP {ep}] return={ep_ret:.6f}")
 
-    BAD = ["com", "bond"]
-    if done_reason in BAD:
-        logger.info(f"[EP {ep}] BAD → discard episode")
+    if done_reason in ["com", "bond"]:
+        logger.info(f"[EP {ep}] BAD episode → discard transitions")
         replay.end_episode(keep=False)
     else:
-        logger.info(f"[EP {ep}] GOOD → keep transitions")
+        logger.info(f"[EP {ep}] GOOD episode → keep transitions")
         replay.end_episode(keep=True)
 
-    logger.info(f"[EP {ep}] replay_size={len(replay):,}")
+    logger.info(f"[EP {ep}] replay size = {len(replay):,}")
 
     ###############################################################
-    # 7. UPDATE
+    # SAC UPDATE
     ###############################################################
     if len(replay) > agent.batch_size:
         losses = agent.update()
         logger.info(
-            f"[UPDATE] q1={losses['q1_loss']:.5f} "
-            f"q2={losses['q2_loss']:.5f} "
-            f"v={losses['v_loss']:.5f} "
+            f"[UPDATE] "
+            f"q1={losses['q1_loss']:.6f}  "
+            f"q2={losses['q2_loss']:.6f}  "
+            f"v={losses['v_loss']:.6f}  "
             f"pi={losses['policy_loss']}"
         )
 
     ###############################################################
-    # 8. CHECKPOINT
+    # CHECKPOINT
     ###############################################################
     if ep % CHECKPOINT_INTERVAL == 0 and ep > 0:
         save_checkpoint(ep, agent, tag="interval")
 
 
 ###############################################################
-# FINAL SAVE
+# FINAL CKPT SAVE
 ###############################################################
 save_checkpoint(EPOCHS, agent, tag="final")
 
-logger.info("[TRAIN DONE]")
-logger.info(f"wallclock={(time.time() - global_start)/3600:.3f} hr")
-
+logger.info("============ TRAINING DONE ============")
+logger.info(f"wallclock time = {(time.time() - global_start)/3600:.3f} hr")
 print("== training finished ==")
-
-
