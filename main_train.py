@@ -1,5 +1,5 @@
 ###############################################################
-# train_mof_scale_rl.py (Fixed version)
+# train_mof_scale_rl.py (Enhanced Monitoring Version)
 ###############################################################
 
 import os
@@ -134,7 +134,7 @@ for ep in range(EPOCHS):
     logger.info(f"[EP {ep}] max_steps = {max_steps}")
 
     ###############################################################
-    # 2. Snapshot folders
+    # 2. Snapshot Directory
     ###############################################################
     snap_dir = f"snapshots/EP{ep:04d}"
     os.makedirs(snap_dir, exist_ok=True)
@@ -152,9 +152,9 @@ for ep in range(EPOCHS):
     ###############################################################
     cif = sample_cif()
     atoms = read(cif)
-    atoms.calc = calc  # << calc MUST be attached here
+    atoms.calc = calc
+    logger.info(f"[EP {ep}] CIF loaded: {cif}")
 
-    # loader MUST return a fresh Atoms() with calculator preserved
     def loader():
         a = atoms.copy()
         a.calc = calc
@@ -168,17 +168,16 @@ for ep in range(EPOCHS):
     )
 
     obs = env.reset()
-    logger.info(f"[EP {ep}] CIF loaded: {cif}")
 
     N_atom = env.N
     obs_dim = obs.shape[1]
 
     ###############################################################
-    # 4. First episode only: init Replay & Agent
+    # 4. First episode only
     ###############################################################
     if ep == 0:
         OBS_DIM = obs_dim
-        logger.info(f"[INIT] OBS_DIM={OBS_DIM} | ACT_DIM=1")
+        logger.info(f"[INIT] OBS_DIM={OBS_DIM} | ACT_DIM={ACT_DIM}")
 
         replay = ReplayBuffer(
             obs_dim=OBS_DIM,
@@ -203,7 +202,6 @@ for ep in range(EPOCHS):
 
         logger.info("[INIT] Agent + ReplayBuffer allocated.")
 
-
     ###############################################################
     # 5. EPISODE
     ###############################################################
@@ -211,6 +209,9 @@ for ep in range(EPOCHS):
 
     ep_ret = 0.0
     done_reason = "none"
+
+    com_drift_cum = 0.0
+    energy_history = []
 
     for step in tqdm(range(max_steps), desc=f"[EP {ep}]", ncols=120):
 
@@ -225,8 +226,31 @@ for ep in range(EPOCHS):
         # ENV STEP
         ###########################################################
         next_obs, reward, done, done_reason, Etot, Fmax = env.step(scale_arr)
-
         reward = reward.astype(np.float32)
+
+        Fnorm = np.linalg.norm(env.forces, axis=1)
+        Fmin  = float(np.min(Fnorm))
+        Fmean = float(np.mean(Fnorm))
+        Fstd  = float(np.std(Fnorm))
+        Fmed  = float(np.median(Fnorm))
+
+        E_avg = Etot / N_atom
+        energy_history.append(E_avg)
+        Emean_hist = float(np.mean(energy_history))
+        Estd_hist = float(np.std(energy_history))
+
+        com_now = env.atoms.positions.mean(axis=0)
+        COM_drift_step = float(np.linalg.norm(com_now - env.com_prev))
+        com_drift_cum += COM_drift_step
+
+        disp_mag = np.linalg.norm(env.disp_last, axis=1)
+        Disp_mean = float(np.mean(disp_mag))
+        Disp_max  = float(np.max(disp_mag))
+
+        rew_mean = float(np.mean(reward))
+        rew_std  = float(np.std(reward))
+        rew_min  = float(np.min(reward))
+        rew_max  = float(np.max(reward))
 
         ###########################################################
         # STORE (per-atom)
@@ -237,18 +261,23 @@ for ep in range(EPOCHS):
             )
 
         ###########################################################
-        # TRAJECTORY
+        # TRAJECTORY SAVE
         ###########################################################
         env.atoms.write(traj_xyz, append=True)
-
         with open(energy_log, "a") as f:
-            f.write(f"{step} {Etot:.8f} {Etot/N_atom:.8f}\n")
+            f.write(f"{step} {Etot:.8f} {E_avg:.8f}\n")
 
-        rew_mean = float(np.mean(reward))
-
+        ###########################################################
+        # EXTENDED LOGGING (NEW)
+        ###########################################################
         logger.info(
             f"[EP {ep}][STEP {step}] "
-            f"N={N_atom} | Fmax={Fmax:.6f} | rew_mean={rew_mean:.6f} | "
+            f"N={N_atom} | "
+            f"Fmax={Fmax:.3e} Fmin={Fmin:.3e} Fmean={Fmean:.3e} Fstd={Fstd:.3e} Fmed={Fmed:.3e} | "
+            f"E={Etot:.3f} E/atom={E_avg:.5f} Emean_hist={Emean_hist:.5f} Estd_hist={Estd_hist:.5f} | "
+            f"COM_step={COM_drift_step:.4f} COM_cum={com_drift_cum:.4f} | "
+            f"Disp_mean={Disp_mean:.4e} Disp_max={Disp_max:.4e} | "
+            f"rew_mean={rew_mean:.5f} rew_std={rew_std:.5f} rmin={rew_min:.5f} rmax={rew_max:.5f} | "
             f"alpha={float(agent.alpha):.5f} | buffer={len(replay):,}"
         )
 
@@ -265,9 +294,8 @@ for ep in range(EPOCHS):
     ###############################################################
     logger.info(f"[EP {ep}] return={ep_ret:.6f}")
 
-    BAD_TERMS = ["com", "bond"]
-
-    if done_reason in BAD_TERMS:
+    BAD = ["com", "bond"]
+    if done_reason in BAD:
         logger.info(f"[EP {ep}] BAD → discard episode")
         replay.end_episode(keep=False)
     else:
@@ -304,4 +332,5 @@ logger.info("[TRAIN DONE]")
 logger.info(f"wallclock={(time.time() - global_start)/3600:.3f} hr")
 
 print("== training finished ==")
+
 
