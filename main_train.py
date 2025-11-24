@@ -1,4 +1,3 @@
-# main_train.py
 ###############################################################
 # MOF Multi-Agent SAC Training Script
 #
@@ -16,7 +15,7 @@ import random
 import argparse
 import logging
 from logging.handlers import RotatingFileHandler
-from typing import List, Tuple
+from typing import List
 
 import numpy as np
 from tqdm.auto import tqdm
@@ -116,7 +115,7 @@ def build_atoms_loader(
     logger: logging.Logger,
 ):
     """
-    MOFEnv에 넘겨줄 atoms_loader 클로저를 만든다.
+    MOFEnv에 넘겨줄 atoms_loader 클로저.
     매 호출마다 랜덤 CIF 하나를 골라 ASE Atoms를 리턴.
 
     atoms.info["cif_path"] 에 경로를 넣어두면
@@ -146,13 +145,15 @@ def append_metrics(
     done_reason: str,
     fmax_last: float,
     buffer_size: int,
+    cif_path: str,
 ):
     header = (
         "episode,total_steps,return,steps,done_reason,"
-        "fmax_last,buffer_size\n"
+        "fmax_last,buffer_size,cif_path\n"
     )
-    line = "{:d},{:d},{:.6f},{:d},{:s},{:.6f},{:d}\n".format(
-        ep, total_steps, ep_return, ep_steps, done_reason, fmax_last, buffer_size
+    # CIF 경로는 따옴표로 감싸서 저장 (쉼표 포함 대비)
+    line = "{:d},{:d},{:.6f},{:d},{:s},{:.6f},{:d},\"{}\"\n".format(
+        ep, total_steps, ep_return, ep_steps, done_reason, fmax_last, buffer_size, cif_path
     )
 
     write_header = not os.path.exists(metrics_path)
@@ -191,8 +192,8 @@ def train(args):
         model_path=args.mace_model,
         device=device,
         default_dtype="float32",
-        head="pbe_d3"
-        )
+        head="pbe_d3",
+    )
 
     # ----------------------------
     # Atoms loader & Env & 초기 obs_dim
@@ -213,6 +214,7 @@ def train(args):
 
     # 첫 reset으로 obs_dim, global_dim 파악
     obs_atom, obs_global = env.reset()
+    obs_atom = np.asarray(obs_atom, dtype=np.float32)
     N0, feat_dim = obs_atom.shape
     obs_dim = feat_dim
     act_dim = 3  # per-atom 3D displacement
@@ -319,7 +321,9 @@ def train(args):
         last_fmax = np.nan
         done_reason = "none"
 
+        # env.reset()에서 설정한 현재 CIF 경로
         cif_path = getattr(env, "current_cif_path", "unknown")
+
         logger.info("================================================================")
         logger.info("[EP %d] START", ep)
         logger.info("[EP %d] CIF = %s", ep, cif_path)
@@ -352,7 +356,7 @@ def train(args):
                 )
                 actions = actions_tensor.detach().cpu().numpy().astype(np.float32)
 
-            # 2) env.step
+            # 2) env.step  --- 5-튜플 반환 (obs_atom, obs_global, reward, done, info)
             next_obs_atom, next_obs_global, reward, done, info = env.step(actions)
 
             next_obs_atom = np.asarray(next_obs_atom, dtype=np.float32)
@@ -365,10 +369,13 @@ def train(args):
                 next_atom_type = np.asarray(next_atom_type, dtype=np.int64)
 
             ep_return += float(reward)
+
+            # info dict에서 종료 이유 / Fmax 등 추출
             last_fmax = float(info.get("Fmax", np.nan))
             done_reason = info.get("done_reason", "unknown")
 
             # 3) Replay buffer에 per-atom transition 저장
+            #    새 래퍼 store(...) 사용 (추가 인자는 버퍼 내부에서 현재는 무시)
             replay_buffer.store(
                 obs=obs_atom,
                 acts=actions,
@@ -382,10 +389,9 @@ def train(args):
             )
 
             # 4) 학습 업데이트 (warmup 이후)
-            metrics = {}
             if total_steps >= args.warmup_steps:
                 for _ in range(args.updates_per_step):
-                    metrics = agent.update(args.batch_size)
+                    _ = agent.update(args.batch_size)
 
             # 5) tqdm 표시
             postfix = {
@@ -450,6 +456,7 @@ def train(args):
             done_reason=done_reason,
             fmax_last=last_fmax if not np.isnan(last_fmax) else 0.0,
             buffer_size=len(replay_buffer),
+            cif_path=cif_path,
         )
 
         # 체크포인트 저장

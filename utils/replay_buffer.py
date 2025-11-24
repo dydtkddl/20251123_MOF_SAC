@@ -1,4 +1,3 @@
-# utils/replay_buffer.py
 ###############################################################
 # MultiAgentReplayBuffer
 # -------------------------------------------------------------
@@ -41,7 +40,7 @@ class MultiAgentReplayBuffer:
       - n-step return 계산 후 각 원자별 튜플로 flatten하여 저장.
 
     저장되는 transition (per-atom):
-        (obs_i, act_i, R_nstep, next_obs_i, done_nstep)
+        (obs_i, act_i, R_nstep, next_obs_i, done_n)
 
     PER:
         p_i ∝ (|δ_i| + eps)^α
@@ -335,7 +334,7 @@ class MultiAgentReplayBuffer:
             )
 
     # ------------------------------------------------------------------
-    # Public: 매 step마다 호출
+    # Public: 매 step마다 호출 (기존 API)
     # ------------------------------------------------------------------
     def store_step(
         self,
@@ -390,6 +389,42 @@ class MultiAgentReplayBuffer:
                 self.size,
             )
 
+    # ------------------------------------------------------------------
+    # Public: SAC용 래퍼 메서드 (새 API)
+    # ------------------------------------------------------------------
+    def store(
+        self,
+        obs: np.ndarray,
+        acts: np.ndarray,
+        rews: float,
+        next_obs: np.ndarray,
+        done: bool,
+        atom_type: Optional[np.ndarray] = None,
+        next_atom_type: Optional[np.ndarray] = None,
+        global_feat: Optional[np.ndarray] = None,
+        next_global: Optional[np.ndarray] = None,
+    ):
+        """
+        SAC 쪽에서 일반적으로 사용하는 인터페이스에 맞춘 래퍼.
+
+        Parameters
+        ----------
+        obs : (N, obs_dim)
+        acts : (N, act_dim)
+        rews : float
+        next_obs : (N, obs_dim)
+        done : bool
+        atom_type, next_atom_type, global_feat, next_global :
+            현재 구현에서는 사용하지 않으며, 향후 확장을 위해 인터페이스만 맞춰둠.
+        """
+        self.store_step(
+            obs_atom=obs,
+            actions=acts,
+            reward=rews,
+            next_obs_atom=next_obs,
+            done=done,
+        )
+
     def on_episode_end(self):
         """
         에피소드 종료 시 호출.
@@ -402,19 +437,21 @@ class MultiAgentReplayBuffer:
     # ------------------------------------------------------------------
     # PER 샘플링
     # ------------------------------------------------------------------
-    def sample(self, batch_size: Optional[int] = None) -> Dict[str, Any]:
+    def sample(self, batch_size: Optional[int] = None):
         """
         PER 기반 mini-batch 샘플링.
 
         Returns
         -------
-        dict:
+        batch, idxs, weights
+
+        batch : dict
             {
                 "obs": np.ndarray (B, obs_dim),
                 "acts": np.ndarray (B, act_dim),
                 "rews": np.ndarray (B,),
                 "next_obs": np.ndarray (B, obs_dim),
-                "dones": np.ndarray (B,),
+                "done": np.ndarray (B,),
                 "idxs": np.ndarray (B,),
                 "weights": np.ndarray (B,),
                 # torch 텐서 (torch가 있다면):
@@ -422,9 +459,15 @@ class MultiAgentReplayBuffer:
                 "acts_t": torch.Tensor (B, act_dim),
                 "rews_t": torch.Tensor (B, 1),
                 "next_obs_t": torch.Tensor (B, obs_dim),
-                "dones_t": torch.Tensor (B, 1),
+                "done_t": torch.Tensor (B, 1),
                 "weights_t": torch.Tensor (B, 1)
             }
+
+        idxs : np.ndarray (B,)
+            선택된 버퍼 인덱스 (int64)
+
+        weights : np.ndarray (B,)
+            중요도 가중치 (float32)
         """
         if self.size == 0:
             raise RuntimeError("Replay buffer is empty; cannot sample.")
@@ -453,7 +496,7 @@ class MultiAgentReplayBuffer:
             "acts": self.acts_buf[idxs].copy(),
             "rews": self.rew_buf[idxs].copy(),
             "next_obs": self.next_obs_buf[idxs].copy(),
-            "dones": self.done_buf[idxs].copy(),
+            "done": self.done_buf[idxs].copy(),   # ★ 키 이름: done
             "idxs": idxs.astype(np.int64),
             "weights": weights,
         }
@@ -465,7 +508,7 @@ class MultiAgentReplayBuffer:
             batch["acts_t"] = torch.as_tensor(batch["acts"], device=device, dtype=torch.float32)
             batch["rews_t"] = torch.as_tensor(batch["rews"], device=device, dtype=torch.float32).unsqueeze(-1)
             batch["next_obs_t"] = torch.as_tensor(batch["next_obs"], device=device, dtype=torch.float32)
-            batch["dones_t"] = torch.as_tensor(batch["dones"], device=device, dtype=torch.float32).unsqueeze(-1)
+            batch["done_t"] = torch.as_tensor(batch["done"], device=device, dtype=torch.float32).unsqueeze(-1)
             batch["weights_t"] = torch.as_tensor(batch["weights"], device=device, dtype=torch.float32).unsqueeze(-1)
 
         logger.debug(
@@ -474,7 +517,9 @@ class MultiAgentReplayBuffer:
             self.beta,
         )
 
-        return batch
+        # ★ 기존: return batch
+        #    명세에 따라 (batch, idxs, weights) 반환
+        return batch, idxs.astype(np.int64), weights
 
     # ------------------------------------------------------------------
     # PER priority 업데이트
@@ -506,6 +551,13 @@ class MultiAgentReplayBuffer:
             len(idxs),
             self.max_priority,
         )
+
+    # ★ alias 메서드: SAC 코드에서 update_priority(...)를 호출해도 동작하도록
+    def update_priority(self, idxs: np.ndarray, td_errors: np.ndarray):
+        """
+        Alias for update_priorities, to match external SAC interface.
+        """
+        return self.update_priorities(idxs, td_errors)
 
     # ------------------------------------------------------------------
     # Debug / Inspect 용 메서드

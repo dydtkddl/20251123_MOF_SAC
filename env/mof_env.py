@@ -1,4 +1,3 @@
-# env/mof_env.py
 ###############################################################
 # MOFEnv — Multi-Agent RL Environment for MOF Structure Relaxation
 # -----------------------------------------------------------------
@@ -16,8 +15,8 @@
 #                               boundary proximity, pore-lining flag
 # - _obs(): per-atom obs_i + k-NN neighbor features → obs_atom (N, FEAT)
 # - reset() → (obs_atom, obs_global_flat)
-# - step(actions) → (next_obs_atom, next_obs_global_flat, reward_scalar, done,
-#                    reason, Etot_stub, Fmax)
+# - step(actions) → (next_obs_atom, next_obs_global_flat,
+#                    reward_scalar, done, info_dict)
 ###############################################################
 
 import logging
@@ -39,6 +38,20 @@ class MOFEnv:
         actions: shape (N, 3) in [-1, 1]
         내부적으로 MACS-style scaling으로 displacement 결정 후 구조 업데이트
         reward: log|F| 감소 + COM drift / bond stretch / fmax / max_steps 조건 반영
+
+    Returns (step)
+    --------------
+    obs_atom : np.ndarray
+        shape = (N, FEAT)
+    obs_global : np.ndarray
+        shape = (N*FEAT,)
+    reward_scalar : float
+    done : bool
+    info : dict
+        - "done_reason": {"com","bond","fmax","max_steps", None}
+        - "Etot": float (현재는 placeholder 0.0)
+        - "Fmax": float (현재 step에서 max |F|)
+        - 필요시 추가 정보(e.g. "step", "dCOM", "bond_ratio", ...) 포함
     """
 
     def __init__(
@@ -142,6 +155,9 @@ class MOFEnv:
         self.bond_d0 = None
         self.com_prev = None
         self.step_count = 0
+
+        # 현재 사용 중인 CIF 경로 (loader가 Atoms.info["cif_path"]를 줄 경우 저장)
+        self.current_cif_path: str = "unknown"
 
         # 첫 reset 수행
         self.reset()
@@ -580,7 +596,6 @@ class MOFEnv:
         dist_center = np.linalg.norm(vec_center, axis=1)
 
         # distance to nearest periodic boundary (0 or 1)
-        # small value → boundary 근처
         boundary_prox = np.min(
             np.stack([frac, 1.0 - frac], axis=-1), axis=-1
         )
@@ -735,6 +750,9 @@ class MOFEnv:
             [a.number for a in self.atoms], dtype=int
         )
 
+        # 현재 사용 중인 CIF 경로 (info에 있으면 기록)
+        self.current_cif_path = self.atoms.info.get("cif_path", "unknown")
+
         self.forces = self.atoms.get_forces().astype(np.float32)
         self.bond_pairs, self.bond_d0 = self._detect_bonds()
 
@@ -748,7 +766,7 @@ class MOFEnv:
 
         logger.debug(
             f"[MOFEnv.reset] N={self.N}, bonds={len(self.bond_pairs)}, "
-            f"obs_atom_dim={obs_atom.shape[1]}"
+            f"obs_atom_dim={obs_atom.shape[1]}, cif_path={self.current_cif_path}"
         )
         return obs_atom, obs_global
 
@@ -768,9 +786,11 @@ class MOFEnv:
         obs_global    : (N*FEAT,)
         reward_scalar : float
         done          : bool
-        done_reason   : str or None
-        Etot_stub     : float (에너지 placeholder, 필요 시 DFT/ML 에너지 사용)
-        Fmax          : float (현재 max |F|)
+        info          : dict
+            - "done_reason": {"com","bond","fmax","max_steps", None}
+            - "Etot": float (placeholder, 현재는 0.0)
+            - "Fmax": float (현재 max |F|)
+            - 추가로 "step", "dCOM", "bond_ratio" 등 상황별 보조 정보 포함
         """
         self.step_count += 1
 
@@ -791,6 +811,8 @@ class MOFEnv:
 
         new_F = self.atoms.get_forces().astype(np.float32)
         new_norm = np.linalg.norm(new_F, axis=1)
+        Fmax = float(new_norm.max())
+        Etot_stub = 0.0  # 에너지 placeholder (필요시 calculator에서 받아서 교체 가능)
 
         # --------------------------------------------------------------
         # 1) Force-based reward (log|F| 감소)
@@ -812,19 +834,21 @@ class MOFEnv:
             self.forces = new_F
             obs_atom = self._obs()
             obs_global = self.flatten_obs(obs_atom)
+
+            info = {
+                "done_reason": "com",
+                "Etot": Etot_stub,
+                "Fmax": Fmax,
+                "step": self.step_count,
+                "dCOM": float(dCOM),
+            }
+
             logger.debug(
                 f"[MOFEnv.step] done='com', step={self.step_count}, "
-                f"dCOM={dCOM:.4f}, reward={reward_scalar:.4f}"
+                f"dCOM={dCOM:.4f}, Fmax={Fmax:.4e}, reward={reward_scalar:.4f}"
             )
-            return (
-                obs_atom,
-                obs_global,
-                reward_scalar,
-                True,
-                "com",
-                0.0,
-                float(new_norm.max()),
-            )
+
+            return obs_atom, obs_global, reward_scalar, True, info
 
         # --------------------------------------------------------------
         # 3) Bond stretch penalty + termination
@@ -835,7 +859,6 @@ class MOFEnv:
         #        reward -= penalty
         #        done = True, reason="bond"
         # --------------------------------------------------------------
-        Fmax = float(new_norm.max())
         for idx, (i, j) in enumerate(self.bond_pairs):
             v = self._pbc_vec(i, j)
             d = np.linalg.norm(v)
@@ -867,19 +890,27 @@ class MOFEnv:
                 self.forces = new_F
                 obs_atom = self._obs()
                 obs_global = self.flatten_obs(obs_atom)
+
+                info = {
+                    "done_reason": "bond",
+                    "Etot": Etot_stub,
+                    "Fmax": Fmax,
+                    "step": self.step_count,
+                    "bond_index": int(idx),
+                    "bond_atoms": (int(i), int(j)),
+                    "bond_ratio": float(ratio),
+                    "bond_d0": float(self.bond_d0[idx]),
+                    "bond_d": float(d),
+                    "bond_penalty": float(penalty),
+                }
+
                 logger.debug(
                     f"[MOFEnv.step] done='bond', step={self.step_count}, "
-                    f"ratio={ratio:.3f}, reward={reward_scalar:.4f}"
+                    f"ratio={ratio:.3f}, Fmax={Fmax:.4e}, "
+                    f"reward={reward_scalar:.4f}"
                 )
-                return (
-                    obs_atom,
-                    obs_global,
-                    reward_scalar,
-                    True,
-                    "bond",
-                    0.0,
-                    Fmax,
-                )
+
+                return obs_atom, obs_global, reward_scalar, True, info
 
         # --------------------------------------------------------------
         # 4) Fmax termination
@@ -889,19 +920,20 @@ class MOFEnv:
             self.forces = new_F
             obs_atom = self._obs()
             obs_global = self.flatten_obs(obs_atom)
+
+            info = {
+                "done_reason": "fmax",
+                "Etot": Etot_stub,
+                "Fmax": Fmax,
+                "step": self.step_count,
+            }
+
             logger.debug(
                 f"[MOFEnv.step] done='fmax', step={self.step_count}, "
                 f"Fmax={Fmax:.4e}, reward={reward_scalar:.4f}"
             )
-            return (
-                obs_atom,
-                obs_global,
-                reward_scalar,
-                True,
-                "fmax",
-                0.0,
-                Fmax,
-            )
+
+            return obs_atom, obs_global, reward_scalar, True, info
 
         # --------------------------------------------------------------
         # 5) max-step termination
@@ -911,39 +943,39 @@ class MOFEnv:
             self.forces = new_F
             obs_atom = self._obs()
             obs_global = self.flatten_obs(obs_atom)
+
+            info = {
+                "done_reason": "max_steps",
+                "Etot": Etot_stub,
+                "Fmax": Fmax,
+                "step": self.step_count,
+            }
+
             logger.debug(
                 f"[MOFEnv.step] done='max_steps', step={self.step_count}, "
                 f"Fmax={Fmax:.4e}, reward={reward_scalar:.4f}"
             )
-            return (
-                obs_atom,
-                obs_global,
-                reward_scalar,
-                True,
-                "max_steps",
-                0.0,
-                Fmax,
-            )
+
+            return obs_atom, obs_global, reward_scalar, True, info
 
         # --------------------------------------------------------------
-        # 6) Normal step
+        # 6) Normal step (no termination)
         # --------------------------------------------------------------
         self.F_prev = new_F.copy()
         self.forces = new_F
         obs_atom = self._obs()
         obs_global = self.flatten_obs(obs_atom)
 
+        info = {
+            "done_reason": None,
+            "Etot": Etot_stub,
+            "Fmax": Fmax,
+            "step": self.step_count,
+        }
+
         logger.debug(
             f"[MOFEnv.step] step={self.step_count}, "
             f"Fmax={Fmax:.4e}, reward={reward_scalar:.4f}"
         )
 
-        return (
-            obs_atom,
-            obs_global,
-            reward_scalar,
-            False,
-            None,
-            0.0,
-            Fmax,
-        )
+        return obs_atom, obs_global, reward_scalar, False, info
