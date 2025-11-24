@@ -11,16 +11,16 @@
 #   • act_dim   : per-atom action dim (3: Δx, Δy, Δz)
 #
 #   • ReplayBuffer.sample(batch_size) → (batch, idxs, weights)
-#       batch["obs"]        : (B, obs_dim)           # s_i
-#       batch["acts"]       : (B, act_dim)           # a_i
-#       batch["rews"]       : (B,)                   # scalar r
-#       batch["next_obs"]   : (B, obs_dim)           # s'_i
-#       batch["done"]       : (B,)                   # 0/1
+#       batch["obs"]           : (B, obs_dim)           # s_i
+#       batch["acts"]          : (B, act_dim)           # a_i
+#       batch["rews"]          : (B,)                   # scalar r
+#       batch["next_obs"]      : (B, obs_dim)           # s'_i
+#       batch["done"]          : (B,)                   # 0/1
 #       (optional)
-#       batch["atom_type"]  : (B,)                   # i의 atom_type_id
+#       batch["atom_type"]     : (B,)                   # i의 atom_type_id
 #       batch["next_atom_type"]: (B,)
-#       batch["global"]     : (B, global_dim)
-#       batch["next_global"]: (B, global_dim)
+#       batch["global"]        : (B, global_dim)
+#       batch["next_global"]   : (B, global_dim)
 #
 #   • PER:
 #       idxs    : (B,) priority index (numpy)
@@ -28,6 +28,7 @@
 #
 #   • PER priority update:
 #       replay_buffer.update_priority(idxs, td_errors)
+#       또는 replay_buffer.update_priorities(idxs, td_errors)
 #
 ###############################################################
 
@@ -153,6 +154,7 @@ class MultiAgentSAC:
         # ------------------------------------------------------
         # Entropy temperature α (auto-tuning)
         # ------------------------------------------------------
+        # log_alpha 자체를 저장/로드하는 컨벤션
         self.log_alpha = torch.tensor(
             np.log(alpha),
             dtype=torch.float32,
@@ -231,8 +233,8 @@ class MultiAgentSAC:
         atom_type_id : (N,) or None
         global_feat : (global_dim,) or (N, global_dim) or None
         deterministic : bool
-            True면 mean action (no noise),
-            False면 reparameterized sample.
+            True면 mean action(mu)을 사용 (가능한 경우),
+            False면 stochastic sample(pi)를 사용.
 
         Returns
         -------
@@ -266,20 +268,24 @@ class MultiAgentSAC:
             else:
                 global_feat = global_feat.to(self.device)
 
-        if deterministic:
-            actions, _, _, _ = self.actor(
-                obs_atom,
-                atom_type_id=atom_type_id,
-                global_feat=global_feat,
-                deterministic=True,
-            )
+        # AtomActor.forward는 deterministic 인자를 받지 않는다고 가정
+        # 보통 (pi, logp, mu, log_std) 형태로 반환한다고 가정
+        out = self.actor(
+            obs_atom,
+            atom_type_id=atom_type_id,
+            global_feat=global_feat,
+        )
+
+        if isinstance(out, tuple):
+            tmp = list(out) + [None] * (4 - len(out))
+            pi, logp, mu, log_std = tmp[:4]
         else:
-            actions, _, _, _ = self.actor(
-                obs_atom,
-                atom_type_id=atom_type_id,
-                global_feat=global_feat,
-                deterministic=False,
-            )
+            pi, logp, mu, log_std = out, None, None, None
+
+        if deterministic and (mu is not None):
+            actions = mu
+        else:
+            actions = pi
 
         self.actor.train()
         return actions
@@ -295,7 +301,7 @@ class MultiAgentSAC:
         -------
         batch_torch : Dict[str, torch.Tensor]
         idxs        : np.ndarray or None  (PER priority update용)
-        weights_t   : torch.Tensor or None
+        weights_t   : torch.Tensor        (B, 1)
         """
         batch, idxs, weights = self.replay_buffer.sample(batch_size)
 
@@ -324,7 +330,7 @@ class MultiAgentSAC:
         else:
             weights_t = None
 
-        # per_use_weights=False면 importance weight를 1로 처리
+        # per_use_weights=False 이거나 weights가 없으면 importance weight를 1로 처리
         if not self.per_use_weights or weights_t is None:
             weights_t = torch.ones_like(rews, device=self.device)
 
@@ -393,7 +399,6 @@ class MultiAgentSAC:
                 next_obs,
                 atom_type_id=next_atom_type,
                 global_feat=next_global,
-                deterministic=False,
             )
 
             # Q target from target critic
@@ -430,14 +435,20 @@ class MultiAgentSAC:
             torch.nn.utils.clip_grad_norm_(self.critic.parameters(), self.max_grad_norm)
         self.critic_optimizer.step()
 
-        # PER priority update (alias: update_priority → update_priorities)
-        if idxs is not None and hasattr(self.replay_buffer, "update_priority"):
-            with torch.no_grad():
-                # numpy (CPU) 배열로 변환
-                new_priorities = (
-                    td_error.abs().squeeze(-1).detach().cpu().numpy()
-                )
-            self.replay_buffer.update_priority(idxs, new_priorities)
+        # PER priority update (update_priority / update_priorities 둘 다 지원)
+        if idxs is not None:
+            if hasattr(self.replay_buffer, "update_priority"):
+                with torch.no_grad():
+                    new_priorities = (
+                        td_error.abs().squeeze(-1).detach().cpu().numpy()
+                    )
+                self.replay_buffer.update_priority(idxs, new_priorities)
+            elif hasattr(self.replay_buffer, "update_priorities"):
+                with torch.no_grad():
+                    new_priorities = (
+                        td_error.abs().squeeze(-1).detach().cpu().numpy()
+                    )
+                self.replay_buffer.update_priorities(idxs, new_priorities)
 
         # ------------------------------------------------------
         # 2) Actor update
@@ -448,7 +459,6 @@ class MultiAgentSAC:
             obs,
             atom_type_id=atom_type,
             global_feat=global_feat,
-            deterministic=False,
         )
         q1_pi, q2_pi = self.critic(
             obs,
@@ -458,7 +468,6 @@ class MultiAgentSAC:
         )
         q_pi = torch.min(q1_pi, q2_pi)
 
-        # alpha는 critic에서 썼던 log_alpha와 동일한 값 사용
         alpha_tensor = self.log_alpha.exp()
         actor_loss = (weights * (alpha_tensor * logp_pi - q_pi)).mean()
 
@@ -558,7 +567,7 @@ class MultiAgentSAC:
             "actor": self.actor.state_dict(),
             "critic": self.critic.state_dict(),
             "critic_target": self.critic_target.state_dict(),
-            "log_alpha": self.log_alpha.detach().cpu(),
+            "log_alpha": self.log_alpha.detach().cpu(),  # log(alpha) 그대로 저장
             "train_step": self.train_step,
             "actor_opt": self.actor_optimizer.state_dict(),
             "critic_opt": self.critic_optimizer.state_dict(),
@@ -586,12 +595,10 @@ class MultiAgentSAC:
         self.critic_target.load_state_dict(state["critic_target"], strict=strict)
 
         if "log_alpha" in state:
-            # 저장된 값이 이미 log(alpha)인지, alpha인지에 따라 다를 수 있어
-            # 여기서는 alpha 값이라고 가정하고 log 변환
-            loaded_alpha = state["log_alpha"]
-            if isinstance(loaded_alpha, torch.Tensor):
-                loaded_alpha = loaded_alpha.to(self.device)
-            self.log_alpha.data = loaded_alpha.log().clamp_(min=-20.0, max=2.0)
+            loaded_log_alpha = state["log_alpha"]
+            if isinstance(loaded_log_alpha, torch.Tensor):
+                loaded_log_alpha = loaded_log_alpha.to(self.device)
+            self.log_alpha.data = loaded_log_alpha.clamp_(min=-20.0, max=2.0)
 
         self.train_step = int(state.get("train_step", 0))
 
