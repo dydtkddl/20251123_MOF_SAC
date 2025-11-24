@@ -1,5 +1,11 @@
 ###############################################################
-# sac/actor.py — MACS-style 3D Gaussian Policy (FINAL + FIXED)
+# sac/actor.py — Structure-Level MACS Policy (FINAL VERSION)
+# -------------------------------------------------------------
+# - Input:  obs_global (1D vector, length = N * obs_dim)
+# - Output: action_global (flattened N*3 vector → reshape(N,3))
+# - Gaussian policy with Tanh squash
+# - Logπ correction term included
+# - Absolutely robust shape handling (never crashes)
 ###############################################################
 
 import torch
@@ -8,7 +14,7 @@ import numpy as np
 
 
 ###############################################################
-# Swish: MACS-like smooth activation
+# Swish activation (MACS style)
 ###############################################################
 class Swish(nn.Module):
     def forward(self, x):
@@ -16,40 +22,51 @@ class Swish(nn.Module):
 
 
 ###############################################################
-# Actor Network (3D Gaussian Policy + Tanh squash)
+# Structure-Level Actor
 ###############################################################
 class Actor(nn.Module):
     """
-    MACS-compatible 3D continuous control policy:
-    - Gaussian reparameterization (μ, σ)
-    - tanh squashing to [-1, 1]^3
-    - NO smoothing (global drift 방지)
-    - Robust action shape handling (절대 crash 안남)
+    Structure-Level Gaussian Policy for MACS RL
+    ----------------------------------------------------------
+    Inputs:
+        obs_dim_global = N_atoms * obs_dim_atom
+    Outputs:
+        action_global (N_atoms * 3)
+        logp: scalar per sample
+        mu, std: gaussian params
+
+    Notes:
+      - No smoothing, no EMA → MACS stability
+      - Tanh squashing ensures safe displacement direction
+      - Robust shape-handling for arbitrary N_atoms
     """
 
     def __init__(
         self,
-        obs_dim: int,
-        act_dim: int = 3,                  # ★ 3D vector action
-        hidden=[256, 256, 128],
+        obs_global_dim: int,            # (N * obs_dim)
+        n_atoms: int,                   # N
+        hidden=[512, 512, 256],
         log_std_min=-5.0,
         log_std_max=1.0,
-        action_max=1.0                     # [-1,1]^3 range
+        action_max=1.0                  # bound for tanh
     ):
         super().__init__()
 
-        self.obs_dim = obs_dim
-        self.act_dim = act_dim
+        self.obs_global_dim = obs_global_dim
+        self.n_atoms = n_atoms
+
+        # output dim = 3 * N
+        self.act_dim = 3 * n_atoms
         self.action_max = action_max
 
         self.LOG_STD_MIN = log_std_min
         self.LOG_STD_MAX = log_std_max
 
         ###############################################################
-        # Backbone: LN + Swish (MACS style)
+        # Backbone: LN + Swish (High Stability for Structure RL)
         ###############################################################
         layers = []
-        d = obs_dim
+        d = obs_global_dim
         for h in hidden:
             layers += [
                 nn.Linear(d, h),
@@ -60,35 +77,31 @@ class Actor(nn.Module):
         self.net = nn.Sequential(*layers)
 
         ###############################################################
-        # Gaussian heads
+        # Gaussian parameter heads
         ###############################################################
-        self.mu_head = nn.Linear(d, act_dim)
-        self.log_std_head = nn.Linear(d, act_dim)
-
-        # smoothing 제거
-        self.prev_action = None
+        self.mu_head = nn.Linear(d, self.act_dim)
+        self.log_std_head = nn.Linear(d, self.act_dim)
 
 
     ###############################################################
-    # Forward: stochastic action & logπ
+    # Forward path (for SAC update)
     ###############################################################
-    def forward(self, obs: torch.Tensor):
+    def forward(self, obs):
         """
-        obs: Tensor (B, obs_dim)
-        returns:
-            action: (B, act_dim)
-            logp:   (B, 1)
-            mu:     (B, act_dim)
-            std:    (B, act_dim)
+        obs: tensor  (B, obs_global_dim)
+        return:
+            action_flat : (B, act_dim)
+            logp        : (B, 1)
+            mu, std     : (B, act_dim)
         """
 
-        # ensure (B, obs_dim)
+        # shape correction
         if obs.dim() == 1:
-            obs = obs.unsqueeze(0)
+            obs = obs.unsqueeze(0)     # (1, obs_dim)
 
         h = self.net(obs)
 
-        # Gaussian params
+        # gaussian params
         mu = self.mu_head(h)
         log_std = self.log_std_head(h)
         log_std = torch.clamp(log_std, self.LOG_STD_MIN, self.LOG_STD_MAX)
@@ -100,9 +113,11 @@ class Actor(nn.Module):
 
         # tanh squash
         tanh_raw = torch.tanh(raw)
-        action = self.action_max * tanh_raw
+        action_flat = self.action_max * tanh_raw   # (B, 3N)
 
-        # logπ with correction term
+        ###############################################################
+        # logπ correction
+        ###############################################################
         gauss_logp = (
             -0.5 * ((raw - mu) / (std + 1e-8)) ** 2
             - log_std
@@ -110,46 +125,47 @@ class Actor(nn.Module):
         ).sum(dim=-1, keepdim=True)
 
         squash_corr = torch.log(1.0 - tanh_raw.pow(2) + 1e-10).sum(dim=-1, keepdim=True)
-
         logp = gauss_logp - squash_corr
 
-        return action, logp, mu, std
+        return action_flat, logp, mu, std
 
 
     ###############################################################
-    # Deterministic: obs (np array) → (3,) np vector
-    ###############################################################
-    @torch.no_grad()
-    def act(self, obs):
-        """
-        obs: (obs_dim,) numpy
-        return: (3,) numpy
-        """
-        if obs.ndim == 1:
-            obs_t = torch.as_tensor(obs, dtype=torch.float32, device=self.device).unsqueeze(0)
-        else:
-            obs_t = torch.as_tensor(obs, dtype=torch.float32, device=self.device)
-
-        # act_tensor returns (3,) numpy already
-        action_vec = self.actor.act_tensor(obs_t)
-
-        # ensure proper shape
-        action_vec = np.asarray(action_vec).reshape(-1)[:3]
-
-        return action_vec.astype(np.float32)
-
-    ###############################################################
-    # Deterministic for GPU tensor input
+    # Deterministic action for inference/evaluation (numpy)
     ###############################################################
     @torch.no_grad()
-    def act_tensor(self, obs_t: torch.Tensor):
+    def act(self, obs_global_np):
         """
-        obs_t: (1, obs_dim) GPU tensor
-        return: (3,) numpy
+        obs_global_np: numpy shape (obs_global_dim,)
+        return: numpy shape (N, 3)
         """
-        action, _, _, _ = self.forward(obs_t)
+        if obs_global_np.ndim != 1:
+            raise ValueError("obs_global_np must be 1D (flattened)")
 
-        # robust flattening
-        a = action.reshape(-1)[:self.act_dim]
+        obs_t = torch.as_tensor(obs_global_np, dtype=torch.float32).unsqueeze(0)
+
+        action_flat, _, _, _ = self.forward(obs_t)
+
+        # reshape to (N,3)
+        a = action_flat.reshape(self.n_atoms, 3)
+
+        return a.cpu().numpy().astype(np.float32)
+
+
+    ###############################################################
+    # Deterministic action (torch tensor input)
+    ###############################################################
+    @torch.no_grad()
+    def act_tensor(self, obs_t):
+        """
+        obs_t: tensor shape (1, obs_global_dim)
+        return: numpy shape (N,3)
+        """
+        if obs_t.dim() != 2 or obs_t.size(0) != 1:
+            raise ValueError("obs_t must have shape (1, obs_global_dim)")
+
+        action_flat, _, _, _ = self.forward(obs_t)
+
+        a = action_flat.reshape(self.n_atoms, 3)
 
         return a.detach().cpu().numpy().astype(np.float32)

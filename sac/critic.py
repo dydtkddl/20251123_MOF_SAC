@@ -1,13 +1,23 @@
 ###############################################################
-# sac/critic.py — MACS 3D-Action Fully Compatible FINAL VERSION
-# - CriticV: V(s)
-# - CriticQ: Q(s,a)  (3D action version)
-# - TwinCriticQ: SAC Double-Q (Q1, Q2)
+# sac/critic.py — Structure-Level Critic (MACS Global Policy)
+# -------------------------------------------------------------
+# - CriticV: V(s_global)
+# - CriticQ: Q(s_global, a_global)
+# - TwinCriticQ: SAC Double-Q
+#
+# Input:
+#   obs_global_dim = N_atoms * obs_dim_atom
+#   act_global_dim = N_atoms * 3
+#
+# NOTES:
+#   * No per-atom critic
+#   * Pure structure-level critic for stable MACS RL
 ###############################################################
 
 import torch
 import torch.nn as nn
 import numpy as np
+
 
 ###############################################################
 # Swish activation (same as actor)
@@ -18,7 +28,7 @@ class Swish(nn.Module):
 
 
 ###############################################################
-# Utility: build a MACS-style MLP block (Swish + LayerNorm)
+# Utility: MACS MLP (LN + Swish)
 ###############################################################
 def build_mlp(in_dim, hidden_sizes, out_dim, final_act=False):
     layers = []
@@ -41,104 +51,108 @@ def build_mlp(in_dim, hidden_sizes, out_dim, final_act=False):
 
 
 ###############################################################
-# Value Critic: V(s)
+# Value Critic: V(s_global)
 ###############################################################
 class CriticV(nn.Module):
     """
-    V(s) network.
-    Input: obs_dim
-    Output: scalar value V(s)
+    Structure-level V(s):
+        Input  : obs_global (flattened)
+        Output : scalar V(s)
     """
 
-    def __init__(
-        self,
-        obs_dim: int,
-        hidden=[256, 256, 128, 64]
-    ):
+    def __init__(self,
+                 obs_global_dim: int,
+                 hidden=[512, 512, 256]):
         super().__init__()
 
-        self.obs_dim = obs_dim
+        self.obs_global_dim = obs_global_dim
+
         self.net = build_mlp(
-            in_dim=obs_dim,
+            in_dim=obs_global_dim,
             hidden_sizes=hidden,
             out_dim=1,
             final_act=False
         )
 
-    def forward(self, obs: torch.Tensor):
-        if obs.dim() == 1:
-            obs = obs.unsqueeze(0)
-        return self.net(obs)
+
+    def forward(self, obs_global: torch.Tensor):
+        """
+        obs_global: (B, obs_global_dim) or (obs_global_dim,)
+        """
+        if obs_global.dim() == 1:
+            obs_global = obs_global.unsqueeze(0)
+        return self.net(obs_global)  # (B,1)
 
 
 ###############################################################
-# Single Q-network: Q(s,a)
+# Q Critic: Q(s_global, a_global)
 ###############################################################
 class CriticQ(nn.Module):
     """
-    Q(s,a) network.
-    Input:
-        obs: (B, obs_dim)
-        act: (B, 3)   # ★ 3D action
+    Structure-level Q(s,a)
+    ----------------------
+    Inputs:
+        obs_global: (B, obs_global_dim)
+        act_global: (B, act_global_dim)
+
     Output:
         Q-value scalar
     """
 
-    def __init__(
-        self,
-        obs_dim: int,
-        act_dim: int = 3,
-        hidden=[256, 256, 128, 64]
-    ):
+    def __init__(self,
+                 obs_global_dim: int,
+                 act_global_dim: int,
+                 hidden=[512, 512, 256]):
         super().__init__()
 
-        self.obs_dim = obs_dim
-        self.act_dim = act_dim
+        self.obs_global_dim = obs_global_dim
+        self.act_global_dim = act_global_dim
+
+        input_dim = obs_global_dim + act_global_dim
 
         self.net = build_mlp(
-            in_dim=obs_dim + act_dim,
+            in_dim=input_dim,
             hidden_sizes=hidden,
             out_dim=1,
             final_act=False
         )
 
-    def forward(self, obs: torch.Tensor, act: torch.Tensor):
-        """
-        obs: (B, obs_dim)
-        act: (B, 3)
-        """
-        if obs.dim() == 1:
-            obs = obs.unsqueeze(0)
-        if act.dim() == 1:
-            act = act.unsqueeze(0)
 
-        x = torch.cat([obs, act], dim=-1)
-        return self.net(x)
+    def forward(self, obs_global: torch.Tensor, act_global: torch.Tensor):
+        """
+        obs_global: (B, obs_global_dim)  OR  (obs_global_dim,)
+        act_global: (B, act_global_dim)  OR  (act_global_dim,)
+        """
+
+        # shape-normalization → never crash
+        if obs_global.dim() == 1:
+            obs_global = obs_global.unsqueeze(0)
+        if act_global.dim() == 1:
+            act_global = act_global.unsqueeze(0)
+
+        x = torch.cat([obs_global, act_global], dim=-1)
+        return self.net(x)  # (B,1)
 
 
 ###############################################################
-# Twin Critic for SAC: Q1(s,a), Q2(s,a)
+# Twin Critic (SAC Double-Q)
 ###############################################################
 class TwinCriticQ(nn.Module):
     """
-    Two independent Q networks for SAC
-    (Q1, Q2) to mitigate positive bias.
+    Independent Q1, Q2 networks
     """
-
-    def __init__(
-        self,
-        obs_dim: int,
-        act_dim: int = 3,
-        hidden=[256, 256, 128, 64]
-    ):
+    def __init__(self,
+                 obs_global_dim: int,
+                 act_global_dim: int,
+                 hidden=[512, 512, 256]):
         super().__init__()
 
-        self.Q1 = CriticQ(obs_dim, act_dim, hidden)
-        self.Q2 = CriticQ(obs_dim, act_dim, hidden)
+        self.Q1 = CriticQ(obs_global_dim, act_global_dim, hidden)
+        self.Q2 = CriticQ(obs_global_dim, act_global_dim, hidden)
 
-    def forward(self, obs: torch.Tensor, act: torch.Tensor):
+
+    def forward(self, obs_global: torch.Tensor, act_global: torch.Tensor):
         """
-        returns:
-            Q1(s,a), Q2(s,a)
+        return: Q1(s,a), Q2(s,a)
         """
-        return self.Q1(obs, act), self.Q2(obs, act)
+        return self.Q1(obs_global, act_global), self.Q2(obs_global, act_global)

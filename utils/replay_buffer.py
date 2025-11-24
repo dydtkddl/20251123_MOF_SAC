@@ -1,10 +1,21 @@
 ###############################################################
-# utils/replay_buffer.py — MACS 3D-Action Fully Compatible Version
-# - Supports 3D vector action (act_dim = 3)
-# - Prioritized Experience Replay (PER)
-# - n-step returns
-# - Episode-aware sampling (to avoid bad episode imbalance)
-# - Designed to handle 10M-scale buffers
+# utils/replay_buffer.py — Structure-Level SAC Replay Buffer
+# -------------------------------------------------------------
+# - obs_global_dim = N * obs_dim_atom (flatten)
+# - act_global_dim = N * 3            (flatten)
+#
+# Features:
+#   ✓ PER (Prioritized Experience Replay)
+#   ✓ n-step returns (structure-level)
+#   ✓ episode-aware sampling
+#   ✓ handles >10M transitions
+#   ✓ TD-error 기반 priority update
+#
+# Compatible with:
+#   main_train.py
+#   sac/actor.py
+#   sac/critic.py
+#   sac/agent.py
 ###############################################################
 
 import numpy as np
@@ -12,72 +23,95 @@ import random
 from collections import deque
 
 
+
 class ReplayBuffer:
     """
-    Hybrid MACS Replay Buffer with:
-        ✓ act_dim = 3  (for 3D vector actions)
-        ✓ n-step return
-        ✓ Prioritized Experience Replay (PER)
-        ✓ Episode-aware sampling
-        ✓ 10M-scale memory safety
+    Structure-level Replay Buffer for MACS SAC.
 
-    This buffer is compatible with:
-        SACAgent / main_train / actor / critic
+    Stores:
+        s_global   : (obs_global_dim,)
+        a_global   : (act_global_dim,)
+        r          : float
+        ns_global  : (obs_global_dim,)
+        done       : bool
+
+    Key Features:
+        ✓ Prioritized Experience Replay
+        ✓ n-step return merging
+        ✓ episode-aware sampling (balanced training)
+        ✓ 10M-scale circular buffer
     """
 
     def __init__(
         self,
-        obs_dim,
-        max_size=10_000_000,
-        alpha=0.6,
-        beta=0.4,
+        obs_global_dim: int,
+        act_global_dim: int,        # = 3 * N_atoms
+        max_size=5_000_000,
+        alpha=0.6,                  # PER exponent
+        beta=0.4,                   # PER bias correction
         n_step=1,
         gamma=0.995
     ):
-        self.obs_dim = obs_dim
-        self.act_dim = 3        # ★ MACS: ALWAYS 3D action
+        ##########################
+        # DIMENSIONS
+        ##########################
+        self.obs_dim = obs_global_dim
+        self.act_dim = act_global_dim
 
-        self.max_size = max_size
-
+        ##########################
+        # PER settings
+        ##########################
         self.alpha = alpha
         self.beta = beta
-        self.gamma = gamma
 
+        ##########################
+        # n-step settings
+        ##########################
         self.n_step = n_step
+        self.gamma = gamma
         self.n_queue = deque(maxlen=n_step)
 
-        ###############################################################
-        # Main Buffers (huge: up to 10M entries)
-        ###############################################################
-        self.obs_buf  = np.zeros((max_size, obs_dim), np.float32)
-        self.act_buf  = np.zeros((max_size, 3), np.float32)    # ★ 3D ACTION
+        ##########################
+        # Memory allocation
+        ##########################
+        self.max_size = max_size
+
+        self.obs_buf  = np.zeros((max_size, self.obs_dim), np.float32)
+        self.act_buf  = np.zeros((max_size, self.act_dim), np.float32)
         self.rew_buf  = np.zeros((max_size,), np.float32)
-        self.nobs_buf = np.zeros((max_size, obs_dim), np.float32)
+        self.nobs_buf = np.zeros((max_size, self.obs_dim), np.float32)
         self.done_buf = np.zeros((max_size,), np.bool_)
 
         # PER priority buffer
         self.prior_buf = np.zeros((max_size,), np.float32) + 1e-6
 
-        # Pointers
+        ##########################
+        # Pointer tracking
+        ##########################
         self.ptr = 0
         self.size = 0
 
-        # Episode storage for balanced sampling
+        ##########################
+        # Episode management
+        ##########################
         self.current_ep_indices = []
-        self.episode_track = []
+        self.episodes = []     # list of lists (episode index lists)
 
 
-    ###################################################################
-    # Episode lifecycle helpers
-    ###################################################################
+
+    ###############################################################
+    # Episode lifecycle
+    ###############################################################
     def new_episode(self):
+        """Call at the beginning of each episode."""
         self.current_ep_indices = []
         self.n_queue.clear()
 
+
     def end_episode(self, keep=True):
         """
-        keep = False:
-            remove priorities for this episode (training failed episode)
+        If keep=False:
+            Reset priorities for this episode (failed episode)
         """
         if not keep:
             for idx in self.current_ep_indices:
@@ -86,175 +120,187 @@ class ReplayBuffer:
             self.n_queue.clear()
             return
 
-        # Otherwise store successful episode index list
+        # store successful episode
         if len(self.current_ep_indices) > 0:
-            self.episode_track.append(list(self.current_ep_indices))
+            self.episodes.append(list(self.current_ep_indices))
 
         self.current_ep_indices.clear()
         self.n_queue.clear()
 
 
-    ###################################################################
-    # n-step merging
-    ###################################################################
-    def _convert_n_step(self, s, a, r, ns, d):
+
+    ###############################################################
+    # n-step return merging
+    ###############################################################
+    def _merge_n_step(self, s, a, r, ns, done):
         """
-        Input:
-            s  : (obs_dim,)
-            a  : (3,)  vector action
-            r  : reward
-            ns : next state
-            d  : done
+        s, ns  : flattened obs_global_dim vector
+        a      : flattened act_global_dim vector
+        r      : float
+        done   : bool
 
-        If not enough history yet → return None
-        If enough steps → return merged memory tuple
+        Returns:
+            (s0, a0, Rn, ns_n, done_n)
+        OR:
+            None (if insufficient queue yet)
         """
 
-        # Store temporarily
-        self.n_queue.append((s, a, r, ns, d))
+        self.n_queue.append((s, a, r, ns, done))
 
-        # If insufficient n-step history → wait
+        # insufficient history
         if len(self.n_queue) < self.n_step:
             return None
 
-        # Merge reward: R = r0 + γ r1 + γ^2 r2 ...
+        # compute n-step return
         R = 0.0
         g = 1.0
         for (_, _, r_i, _, _) in self.n_queue:
             R += r_i * g
             g *= self.gamma
 
-        # Use first state's s0, a0
-        s0, a0, _, _, _ = self.n_queue[0]
-        # Use last state's next state and done
-        _, _, _, ns_n, d_n = self.n_queue[-1]
+        s0, a0, _, _, _     = self.n_queue[0]
+        _, _, _, ns_n, d_n  = self.n_queue[-1]
 
         return s0, a0, R, ns_n, d_n
 
 
-    ###################################################################
-    # Store one transition (with n-step support)
-    ###################################################################
-    def store(self, s, a, r, ns, d):
+
+    ###############################################################
+    # Store transition (structure-level)
+    ###############################################################
+    def store(self, s, a, r, ns, done):
         """
-        s : (obs_dim,)
-        a : (3,) vector action ★
-        r : float
-        ns: (obs_dim,)
-        d : bool
+        s   : (obs_global_dim,)
+        a   : (act_global_dim,)
+        r   : float
+        ns  : (obs_global_dim,)
+        done: bool
         """
 
-        converted = self._convert_n_step(s, a, r, ns, d)
-        if converted is None:
+        merged = self._merge_n_step(s, a, r, ns, done)
+        if merged is None:
             return
 
-        s0, a0, Rn, ns_n, d_n = converted
+        s0, a0, Rn, ns_n, d_n = merged
 
         idx = self.ptr
 
-        # Store into circular buffer
+        # write into circular buffer
         self.obs_buf[idx]  = s0
         self.act_buf[idx]  = a0
         self.rew_buf[idx]  = Rn
         self.nobs_buf[idx] = ns_n
         self.done_buf[idx] = d_n
 
-        # Initial PER priority
-        self.prior_buf[idx] = abs(float(Rn)) + 1e-6
+        # initial priority = |reward|
+        self.prior_buf[idx] = abs(Rn) + 1e-6
 
-        # Episode indexing
+        # episode index tracking
         self.current_ep_indices.append(idx)
 
-        # Move ptr
-        self.ptr = (self.ptr + 1) % self.max_size
+        # ptr update
+        self.ptr = (idx + 1) % self.max_size
         self.size = min(self.size + 1, self.max_size)
 
 
-    ###################################################################
-    # Episode-aware PER sample
-    ###################################################################
+
+    ###############################################################
+    # Episode-aware PER sampling
+    ###############################################################
     def sample(self, batch_size):
 
         if self.size == 0:
-            raise RuntimeError("ReplayBuffer is empty!")
+            raise RuntimeError("ReplayBuffer is empty.")
 
-        # If no episodes yet → fallback to uniform sampling
-        if len(self.episode_track) == 0:
-            ids = np.random.randint(0, self.size, batch_size)
+        ###############################
+        # If no episodes → uniform sampling
+        ###############################
+        if len(self.episodes) == 0:
+            idxs = np.random.randint(0, self.size, batch_size)
             w = np.ones(batch_size, np.float32)
-            return self._package(ids, w)
+            return self._package(idxs, w)
 
-        # 1) Choose episodes uniformly
+
+        ###############################
+        # 1) choose episodes uniformly
+        ###############################
         chosen_eps = random.sample(
-            self.episode_track,
-            k=min(batch_size, len(self.episode_track))
+            self.episodes,
+            k=min(batch_size, len(self.episodes))
         )
 
-        ids = []
+        idxs = []
 
-        # 2) Sample 1 transition per selected episode (with PER)
+        ###############################
+        # 2) PER sampling inside each episode
+        ###############################
         for ep_idxs in chosen_eps:
-            p = self.prior_buf[ep_idxs]
-            if np.sum(p) < 1e-12:   # avoid degenerate
+            pri = self.prior_buf[ep_idxs]
+
+            if np.sum(pri) < 1e-12:
                 continue
 
-            prob = (p ** self.alpha)
+            prob = pri ** self.alpha
             prob /= prob.sum()
 
-            idx = np.random.choice(ep_idxs, p=prob)
-            ids.append(idx)
+            chosen_idx = np.random.choice(ep_idxs, p=prob)
+            idxs.append(chosen_idx)
 
-        # 3) If fewer than batch_size, fill remainder
-        if len(ids) < batch_size:
-            remain = batch_size - len(ids)
-            extra = np.random.randint(0, self.size, remain)
-            ids.extend(extra.tolist())
+        ###############################
+        # 3) fill remainder (uniform)
+        ###############################
+        if len(idxs) < batch_size:
+            need = batch_size - len(idxs)
+            extra = np.random.randint(0, self.size, need)
+            idxs.extend(extra.tolist())
 
-        ids = np.array(ids[:batch_size])
+        idxs = np.array(idxs[:batch_size])
 
-        # 4) PER importance sampling weight
-        pr = self.prior_buf[ids] + 1e-12
+        ###############################
+        # 4) PER importance sampling
+        ###############################
+        pr = self.prior_buf[idxs] + 1e-12
         prob = pr ** self.alpha
         prob /= prob.sum()
 
         w = (self.size * prob) ** (-self.beta)
         w /= w.max()
 
-        return self._package(ids, w.astype(np.float32))
+        return self._package(idxs, w.astype(np.float32))
 
 
-    ###################################################################
-    # Pack results for SACAgent.update()
-    ###################################################################
-    def _package(self, ids, weights):
+
+    ###############################################################
+    # Packaging for SACAgent.update()
+    ###############################################################
+    def _package(self, idxs, w):
         return dict(
-            obs   = self.obs_buf[ids],      # (B, obs_dim)
-            act   = self.act_buf[ids],      # (B, 3) ★
-            rew   = self.rew_buf[ids],      # (B,)
-            nobs  = self.nobs_buf[ids],     # (B, obs_dim)
-            done  = self.done_buf[ids],     # (B,)
-            weights = weights,              # (B,)
-            idx    = ids
+            obs   = self.obs_buf[idxs],       # (B, obs_dim)
+            act   = self.act_buf[idxs],       # (B, act_dim)
+            rew   = self.rew_buf[idxs],       # (B,)
+            nobs  = self.nobs_buf[idxs],      # (B, obs_dim)
+            done  = self.done_buf[idxs],      # (B,)
+            weights = w,                      # (B,)
+            idx    = idxs                     # (B,)
         )
 
 
-    ###################################################################
-    # PER priority update
-    ###################################################################
-    def update_priority(self, idx, td_err):
+
+    ###############################################################
+    # PER priority update (TD error 기반)
+    ###############################################################
+    def update_priority(self, idxs, td_errors):
         """
-        idx : list or int
-        td_err : corresponding TD-error(s)
+        idxs      : array-like index list
+        td_errors : array-like TD error list
         """
-        if np.isscalar(idx):
-            self.prior_buf[idx] = abs(float(td_err)) + 1e-6
-            return
+        td_errors = np.abs(np.asarray(td_errors)) + 1e-6
 
-        td_err = np.asarray(td_err)
-        for i, e in zip(idx, td_err):
-            self.prior_buf[i] = abs(float(e)) + 1e-6
+        for i, e in zip(idxs, td_errors):
+            self.prior_buf[i] = e
 
 
-    ###################################################################
+
+    ###############################################################
     def __len__(self):
         return self.size
