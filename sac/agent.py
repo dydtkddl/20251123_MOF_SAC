@@ -82,6 +82,11 @@ class SACAgent:
     # -------------------------------------------------------------
     def update(self):
 
+        # ------------------------
+        # FIX: 항상 초기화
+        # ------------------------
+        policy_loss = None
+
         batch = self.replay.sample(self.batch_size)
 
         obs  = torch.as_tensor(batch["obs"],  dtype=torch.float32, device=self.device)
@@ -90,9 +95,9 @@ class SACAgent:
         nobs = torch.as_tensor(batch["nobs"], dtype=torch.float32, device=self.device)
         done = torch.as_tensor(batch["done"], dtype=torch.float32, device=self.device).unsqueeze(1)
 
-        # ============================
-        # 1) α update
-        # ============================
+        # ===========================
+        # α update
+        # ===========================
         new_action, logp, _, _ = self.actor(obs)
         alpha_loss = -(self.log_alpha * (logp + self.target_entropy).detach()).mean()
 
@@ -100,18 +105,18 @@ class SACAgent:
         alpha_loss.backward()
         self.alpha_opt.step()
 
-        # ============================
-        # 2) Q update
-        # ============================
+        # ===========================
+        # Q update
+        # ===========================
         with torch.no_grad():
             v_next = self.v_tgt(nobs)
-            q_tgt = rew + (1 - done) * self.gamma * v_next
+            q_target = rew + (1 - done) * self.gamma * v_next
 
         q1_pred = self.q1(obs, act)
         q2_pred = self.q2(obs, act)
 
-        q1_loss = F.mse_loss(q1_pred, q_tgt)
-        q2_loss = F.mse_loss(q2_pred, q_tgt)
+        q1_loss = F.mse_loss(q1_pred, q_target)
+        q2_loss = F.mse_loss(q2_pred, q_target)
 
         self.q1_opt.zero_grad()
         q1_loss.backward()
@@ -121,13 +126,20 @@ class SACAgent:
         q2_loss.backward()
         self.q2_opt.step()
 
-        # ============================
-        # 3) V update
-        # ============================
+        # ===========================
+        # V update
+        # ===========================
         v_pred = self.v(obs)
+
         with torch.no_grad():
-            q_new = torch.min(self.q1(obs, new_action), self.q2(obs, new_action))
+            q_new = torch.min(
+                self.q1(obs, new_action),
+                self.q2(obs, new_action)
+            )
         v_tgt = q_new - self.alpha * logp
+
+        v_pred = v_pred.float()
+        v_tgt  = v_tgt.float()
 
         v_loss = F.mse_loss(v_pred, v_tgt)
 
@@ -135,13 +147,18 @@ class SACAgent:
         v_loss.backward()
         self.v_opt.step()
 
-        # ============================
-        # 4) Policy update
-        # ============================
+
+        # ===========================
+        # Policy update every 2 steps
+        # ===========================
         if self.total_steps % 2 == 0:
 
             aa, lp, _, _ = self.actor(obs)
-            q_new2 = torch.min(self.q1(obs, aa), self.q2(obs, aa))
+
+            q_new2 = torch.min(
+                self.q1(obs, aa),
+                self.q2(obs, aa),
+            )
 
             policy_loss = (self.alpha * lp - q_new2).mean()
 
@@ -151,18 +168,16 @@ class SACAgent:
 
             self.soft_update()
 
+
         self.total_steps += 1
 
-        # ============================
-        # RETURN LOSSES FOR LOGGING
-        # ============================
+        # return losses (optional for logging)
         return {
-            "alpha": float(self.alpha),
-            "alpha_loss": float(alpha_loss),
+            "policy_loss": float(policy_loss) if policy_loss is not None else None,
             "q1_loss": float(q1_loss),
             "q2_loss": float(q2_loss),
             "v_loss": float(v_loss),
-            "policy_loss": float(policy_loss) if self.total_steps % 2 == 0 else None,
+            "alpha_loss": float(alpha_loss),
         }
 
 
