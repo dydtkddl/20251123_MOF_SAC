@@ -16,7 +16,7 @@ class ReplayBuffer:
         - reward-weighted storage (priority-like)
         - reward clipping ready
         - smaller buffer (200k)
-        - warm-up support (default 10k)
+        - warm-up support
     --------------------------------------------------------------------
     """
 
@@ -24,11 +24,11 @@ class ReplayBuffer:
         self,
         obs_dim: int,
         max_size: int = 200_000,
-        reward_weight: float = 2.0,     # reward priority strength
+        reward_weight: float = 0.2,     # ★ priority strength reduced from 2.0 → 0.2
         warmup: int = 10_000,           # minimum samples before training
     ):
         self.obs_dim = obs_dim
-        self.act_dim = 3                # dx, dy, dz only
+        self.act_dim = 3
         self.max_size = max_size
 
         self.reward_weight = reward_weight
@@ -52,19 +52,20 @@ class ReplayBuffer:
         """
         Reward-weighted storage rule:
             p_store = sigmoid(|reward| * reward_weight)
-        This increases probability of storing transitions with informative reward.
+
+        ★ reward_weight이 0.2로 약해져서
+          거의 대부분의 transition이 저장됨 (좋은 안정성)
         """
 
         # reward magnitude determines priority
         mag = abs(float(rew_i))
 
-        # Compute storage probability
-        # sigmoid(x) = 1 / (1 + e^(-x))
+        # Sigmoid priority probability
         p = 1.0 / (1.0 + np.exp(- self.reward_weight * mag))
 
         # Decide store or skip
         if np.random.rand() > p:
-            return False    # skip weak / noise transitions
+            return False
 
         # Store transition
         self.obs_buf[self.ptr]  = obs_i
@@ -85,7 +86,7 @@ class ReplayBuffer:
     def sample(self, batch_size):
         assert (
             self.size >= self.warmup
-        ), f"ReplayBuffer warm-up: need {self.warmup}, current {self.size}"
+        ), f"[ReplayBuffer] Need warmup={self.warmup}, current={self.size}"
 
         idxs = np.random.randint(0, self.size, size=batch_size)
 
@@ -100,9 +101,7 @@ class ReplayBuffer:
 
     # ============================================================
     def ready(self):
-        """Return True if buffer has enough samples for training."""
         return self.size >= self.warmup
-
 
     def __len__(self):
         return self.size

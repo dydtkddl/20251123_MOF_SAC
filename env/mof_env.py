@@ -18,11 +18,11 @@ class MOFEnv:
         max_penalty=10.0,
         debug_bond=False,
 
-        # === New options ===
-        reward_clip=5.0,             # Reward clipping range [-5, 5]
-        base_disp=0.003,             # Initial displacement scale
-        anneal_rate=0.004,           # Displacement annealing rate (adds up to final disp)
-        noise_std=0.0,               # Gaussian position noise per-step
+        # === Updated options ===
+        reward_clip=10.0,            # reward bounded to [-10,+10]
+        base_disp=0.03,              # ★ increased displacement scale
+        anneal_rate=0.05,            # ★ stronger annealing
+        noise_std=0.0,
     ):
         self.atoms_loader = atoms_loader
 
@@ -31,7 +31,7 @@ class MOFEnv:
         self.max_steps = max_steps
         self.fmax_threshold = fmax_threshold
 
-        # Bond-related
+        # Bond related
         self.bond_break_ratio = bond_break_ratio
         self.k_bond = k_bond
         self.max_penalty = max_penalty
@@ -41,7 +41,7 @@ class MOFEnv:
         self.com_threshold = 0.30
         self.com_lambda = 20.0
 
-        # === Newly added parameters ===
+        # === updated parameters ===
         self.reward_clip = reward_clip
         self.base_disp = base_disp
         self.anneal_rate = anneal_rate
@@ -193,28 +193,22 @@ class MOFEnv:
         for a, b in self.bond_pairs:
             Za, Zb = Z[a], Z[b]
 
-            # Metal-O
             if self.is_metal[a] and Zb == 8: self.bond_types[a][0] += 1
             if self.is_metal[b] and Za == 8: self.bond_types[b][0] += 1
 
-            # Metal-N
             if self.is_metal[a] and Zb == 7: self.bond_types[a][1] += 1
             if self.is_metal[b] and Za == 7: self.bond_types[b][1] += 1
 
-            # Carboxylate
             if self.is_carboxylate_O[a]: self.bond_types[b][2] += 1
             if self.is_carboxylate_O[b]: self.bond_types[a][2] += 1
 
-            # Aromatic C-C
             if self.is_aromatic_C[a] and self.is_aromatic_C[b]:
                 self.bond_types[a][3] += 1
                 self.bond_types[b][3] += 1
 
-            # μ2O
             if self.is_mu2O[a]: self.bond_types[b][4] += 1
             if self.is_mu2O[b]: self.bond_types[a][4] += 1
 
-            # μ3O
             if self.is_mu3O[a]: self.bond_types[b][5] += 1
             if self.is_mu3O[b]: self.bond_types[a][5] += 1
 
@@ -347,7 +341,7 @@ class MOFEnv:
         self.atoms.positions += disp
 
         # ============================================================
-        # 1-2) Optional Gaussian noise injection
+        # 1-2) Optional Gaussian noise
         # ============================================================
         if self.noise_std > 0.0:
             self.atoms.positions += np.random.normal(0, self.noise_std, self.atoms.positions.shape)
@@ -370,7 +364,9 @@ class MOFEnv:
         reward -= self.com_lambda * delta_COM
         self.COM_prev = COM_new.copy()
 
+        # premature termination
         if delta_COM > self.com_threshold:
+            reward = reward * 0.2
             reward = np.clip(reward, -self.reward_clip, self.reward_clip)
             return self._obs(), reward, True
 
@@ -393,6 +389,7 @@ class MOFEnv:
             reward -= penalty
 
             if ratio > 6.0 or ratio < 0.25:
+                reward = reward * 0.2
                 reward = np.clip(reward, -self.reward_clip, self.reward_clip)
                 return self._obs(), reward, True
 
@@ -406,8 +403,9 @@ class MOFEnv:
             done = True
 
         # ============================================================
-        # Reward Clipping
+        # Reward scaling + clipping (★ 핵심)
         # ============================================================
+        reward = reward * 0.2
         reward = np.clip(reward, -self.reward_clip, self.reward_clip)
 
         # ============================================================

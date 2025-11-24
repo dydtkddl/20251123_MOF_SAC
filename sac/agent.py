@@ -12,9 +12,9 @@ class SACAgent:
     Stable per-atom SAC agent for MACS-MOF RL with:
         - target entropy = -1.0
         - update frequency K=4
-        - target smoothing (EMA)
+        - EMA-smoothed critic target
         - advantage normalization
-        - FP32 enforced across entire chain
+        - FP32 enforced for MACE stability
     """
 
     def __init__(
@@ -27,16 +27,16 @@ class SACAgent:
         tau=5e-3,
         batch_size=256,
         lr=3e-4,
-        update_every=4,           # ★ update every K steps
-        normalize_adv=True,       # ★ advantage normalization switch
-        ema_beta=0.10             # ★ EMA smoothing factor
+        update_every=4,           # update frequency
+        normalize_adv=True,       # advantage normalization
+        ema_beta=0.02             # ★ EMA smoothing factor (0.10 → 0.02)
     ):
 
         self.replay = replay_buffer
         self.batch_size = batch_size
         self.update_every = update_every
         self.normalize_adv = normalize_adv
-        self.ema_beta = ema_beta
+        self.ema_beta = ema_beta   # ★ updated
 
         self.device = torch.device(device if torch.cuda.is_available() else "cpu")
         self.gamma = gamma
@@ -75,13 +75,13 @@ class SACAgent:
         self.q_target_ema = None  # ★ EMA buffer
 
 
-    # ==============================================================
+    # ==============================================================    
     @property
     def alpha(self):
         return self.log_alpha.exp()
 
 
-    # ==============================================================
+    # ==============================================================    
     @torch.no_grad()
     def act(self, obs):
         obs = torch.as_tensor(obs, dtype=torch.float32, device=self.device)
@@ -89,9 +89,9 @@ class SACAgent:
         return a.cpu().numpy()
 
 
-    # ==============================================================
+    # ==============================================================    
     # SAC UPDATE
-    # ==============================================================
+    # ==============================================================    
     def update(self):
 
         # ----------------------------------------------------------
@@ -127,14 +127,16 @@ class SACAgent:
         # ===========================================================
         with torch.no_grad():
             v_next = self.v_tgt(nobs)
-            q_target_raw = rew + (1 - done) * self.gamma * v_next  # original target
+            q_target_raw = rew + (1 - done) * self.gamma * v_next  
 
             # ★ EMA TARGET SMOOTHING
             if self.q_target_ema is None:
                 self.q_target_ema = q_target_raw.clone()
 
-            self.q_target_ema = (1 - self.ema_beta) * self.q_target_ema + \
-                                 self.ema_beta * q_target_raw
+            self.q_target_ema = (
+                (1 - self.ema_beta) * self.q_target_ema +
+                self.ema_beta * q_target_raw
+            )
 
             q_target = self.q_target_ema
 
@@ -144,7 +146,6 @@ class SACAgent:
 
         q1_loss = F.mse_loss(q1_pred, q_target)
         q2_loss = F.mse_loss(q2_pred, q_target)
-
 
         self.q1_opt.zero_grad()
         q1_loss.backward()
@@ -181,7 +182,7 @@ class SACAgent:
 
 
         # ===========================================================
-        # 4) POLICY update (same frequency as critic)
+        # 4) POLICY update
         # ===========================================================
         aa, lp, _, _ = self.actor(obs)
         q_new2 = torch.min(self.q1(obs, aa), self.q2(obs, aa))
@@ -209,7 +210,7 @@ class SACAgent:
         }
 
 
-    # ==============================================================
+    # ==============================================================    
     def soft_update(self):
         with torch.no_grad():
             for tgt, src in zip(self.v_tgt.parameters(), self.v.parameters()):
