@@ -191,7 +191,8 @@ def train(args):
         model_path=args.mace_model,
         device=device,
         default_dtype="float32",
-    )
+        head="pbe_d3"
+        )
 
     # ----------------------------
     # Atoms loader & Env & 초기 obs_dim
