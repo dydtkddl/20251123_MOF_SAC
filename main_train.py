@@ -134,6 +134,39 @@ def build_atoms_loader(
 
 
 # ============================================================
+# Global feature 길이 고정용 헬퍼
+# ============================================================
+def adjust_global_feat(arr, target_dim: int):
+    """
+    env에서 나오는 obs_global / next_obs_global의 마지막 차원을
+    target_dim에 맞춰 잘라내거나 0으로 패딩한다.
+
+    - arr is None → None 그대로 반환
+    - target_dim <= 0 → None 반환 (global feature 사용 안 함)
+    """
+    if arr is None or target_dim is None or target_dim <= 0:
+        return None
+
+    arr = np.asarray(arr, dtype=np.float32)
+    cur_dim = arr.shape[-1]
+
+    # 이미 길이가 맞으면 그대로
+    if cur_dim == target_dim:
+        return arr
+
+    # 길이가 더 길면 잘라내기
+    if cur_dim > target_dim:
+        return arr[..., :target_dim]
+
+    # 길이가 더 짧으면 0으로 패딩
+    pad_width = target_dim - cur_dim
+    pad_config = [(0, 0)] * arr.ndim
+    pad_config[-1] = (0, pad_width)
+    arr_padded = np.pad(arr, pad_config, mode="constant", constant_values=0.0)
+    return arr_padded
+
+
+# ============================================================
 # metrics.csv 기록용 헬퍼
 # ============================================================
 def append_metrics(
@@ -224,6 +257,9 @@ def train(args):
         obs_global = np.asarray(obs_global, dtype=np.float32)
         global_dim = obs_global.shape[-1]
 
+    # 이후 에피소드에서 사용할 기준 global 차원
+    global_dim_ref = global_dim
+
     # atom_type_id가 env에 있다면 MultiAgentSAC에 atom-type 정보 전달
     n_atom_types = getattr(env, "n_atom_types", None)
 
@@ -232,7 +268,7 @@ def train(args):
         "global_dim=%d, act_dim=%d",
         N0,
         obs_dim,
-        global_dim,
+        global_dim_ref,
         act_dim,
     )
 
@@ -265,7 +301,7 @@ def train(args):
         act_dim=act_dim,
         replay_buffer=replay_buffer,
         n_atom_types=n_atom_types,
-        global_dim=global_dim,
+        global_dim=global_dim_ref,
         actor_hidden=(args.actor_hidden, args.actor_hidden),
         critic_hidden=(args.critic_hidden, args.critic_hidden),
         gamma=args.gamma,
@@ -306,6 +342,9 @@ def train(args):
 
         obs_atom, obs_global = env.reset()
         obs_atom = np.asarray(obs_atom, dtype=np.float32)
+
+        # ★ global feature 길이 고정
+        obs_global = adjust_global_feat(obs_global, global_dim_ref)
         if obs_global is not None:
             obs_global = np.asarray(obs_global, dtype=np.float32)
 
@@ -328,7 +367,12 @@ def train(args):
         logger.info("[EP %d] START", ep)
         logger.info("[EP %d] CIF = %s", ep, cif_path)
         logger.info("[EP %d] N_atoms = %d, max_steps = %d", ep, N_atoms, env.max_steps)
-        logger.info("[EP %d] obs_dim(per-atom) = %d, global_dim = %d", ep, obs_dim, global_dim)
+        logger.info(
+            "[EP %d] obs_dim(per-atom) = %d, global_dim = %d",
+            ep,
+            obs_dim,
+            global_dim_ref,
+        )
 
         step_iter = tqdm(
             range(env.max_steps),
@@ -360,6 +404,9 @@ def train(args):
             next_obs_atom, next_obs_global, reward, done, info = env.step(actions)
 
             next_obs_atom = np.asarray(next_obs_atom, dtype=np.float32)
+
+            # ★ next_global도 기준 차원으로 맞추기
+            next_obs_global = adjust_global_feat(next_obs_global, global_dim_ref)
             if next_obs_global is not None:
                 next_obs_global = np.asarray(next_obs_global, dtype=np.float32)
 
@@ -375,7 +422,6 @@ def train(args):
             done_reason = info.get("done_reason", "unknown")
 
             # 3) Replay buffer에 per-atom transition 저장
-            #    새 래퍼 store(...) 사용 (추가 인자는 버퍼 내부에서 현재는 무시)
             replay_buffer.store(
                 obs=obs_atom,
                 acts=actions,
