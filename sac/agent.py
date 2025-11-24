@@ -66,10 +66,15 @@ class SACAgent:
     ###########################################################################
     @torch.no_grad()
     def act(self, obs):
+        # 1D 입력도 batch처럼 변환
         if obs.ndim == 1:
             obs = obs[np.newaxis, :]
-        obs_t = torch.as_tensor(obs, device=self.device, dtype=torch.float32)
-        return self.actor.act(obs_t.cpu().numpy())
+
+        # GPU 텐서로 변환
+        obs_t = torch.as_tensor(obs, dtype=torch.float32, device=self.device)
+
+        # actor.act_tensor()로 전달
+        return self.actor.act_tensor(obs_t)
 
 
     ###########################################################################

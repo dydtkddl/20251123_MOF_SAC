@@ -117,3 +117,20 @@ class Actor(nn.Module):
             self.prev_action = scale
 
         return scale
+    @torch.no_grad()
+    def act_tensor(self, obs_t):
+        """
+        입력 obs_t는 이미 GPU 텐서로 들어온다.
+        """
+        scale, _, _, _ = self.forward(obs_t)
+
+        scale = scale.squeeze().detach()
+
+        # smoothing
+        if self.prev_action is None:
+            self.prev_action = scale
+        else:
+            scale = 0.7 * self.prev_action + 0.3 * scale
+            self.prev_action = scale
+
+        return scale.cpu().numpy()
