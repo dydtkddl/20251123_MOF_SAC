@@ -11,16 +11,16 @@
 #   • act_dim   : per-atom action dim (3: Δx, Δy, Δz)
 #
 #   • ReplayBuffer.sample(batch_size) → (batch, idxs, weights)
-#       batch["obs"]           : (B, obs_dim)           # s_i
-#       batch["acts"]          : (B, act_dim)           # a_i
-#       batch["rews"]          : (B,)                   # scalar r
-#       batch["next_obs"]      : (B, obs_dim)           # s'_i
-#       batch["done"]          : (B,)                   # 0/1
+#       batch["obs"]        : (B, obs_dim)           # s_i
+#       batch["acts"]       : (B, act_dim)           # a_i
+#       batch["rews"]       : (B,) or (B,1)          # scalar r
+#       batch["next_obs"]   : (B, obs_dim)           # s'_i
+#       batch["done"]       : (B,) or (B,1)          # 0/1
 #       (optional)
-#       batch["atom_type"]     : (B,)                   # i의 atom_type_id
-#       batch["next_atom_type"]: (B,)
-#       batch["global"]        : (B, global_dim)
-#       batch["next_global"]   : (B, global_dim)
+#       batch["atom_type"]      : (B,)               # i의 atom_type_id
+#       batch["next_atom_type"] : (B,)
+#       batch["global"]         : (B, global_dim)
+#       batch["next_global"]    : (B, global_dim)
 #
 #   • PER:
 #       idxs    : (B,) priority index (numpy)
@@ -28,7 +28,6 @@
 #
 #   • PER priority update:
 #       replay_buffer.update_priority(idxs, td_errors)
-#       또는 replay_buffer.update_priorities(idxs, td_errors)
 #
 ###############################################################
 
@@ -80,7 +79,7 @@ class MultiAgentSAC:
         self.replay_buffer = replay_buffer
 
         self.n_atom_types = n_atom_types
-        self.global_dim = int(global_dim)
+        self.global_dim = int(global_dim)  # ★ 전역 차원 기록
 
         self.actor_hidden = tuple(actor_hidden)
         self.critic_hidden = tuple(critic_hidden)
@@ -154,7 +153,6 @@ class MultiAgentSAC:
         # ------------------------------------------------------
         # Entropy temperature α (auto-tuning)
         # ------------------------------------------------------
-        # log_alpha 자체를 저장/로드하는 컨벤션
         self.log_alpha = torch.tensor(
             np.log(alpha),
             dtype=torch.float32,
@@ -233,8 +231,8 @@ class MultiAgentSAC:
         atom_type_id : (N,) or None
         global_feat : (global_dim,) or (N, global_dim) or None
         deterministic : bool
-            True면 mean action(mu)을 사용 (가능한 경우),
-            False면 stochastic sample(pi)를 사용.
+            True면 mean action (no noise),
+            False면 reparameterized sample.
 
         Returns
         -------
@@ -267,26 +265,33 @@ class MultiAgentSAC:
                 )
             else:
                 global_feat = global_feat.to(self.device)
+        # ★ global_dim>0인데 global_feat=None이면, 0으로 채워서 사용
+        if self.global_dim > 0 and global_feat is None:
+            if obs_atom.dim() == 1:
+                batch_n = 1
+            else:
+                batch_n = obs_atom.shape[0]
+            global_feat = torch.zeros(
+                (batch_n, self.global_dim), dtype=torch.float32, device=self.device
+            )
 
-        # AtomActor.forward는 deterministic 인자를 받지 않는다고 가정
-        # 보통 (pi, logp, mu, log_std) 형태로 반환한다고 가정
-        out = self.actor(
-            obs_atom,
-            atom_type_id=atom_type_id,
-            global_feat=global_feat,
-        )
-
-        if isinstance(out, tuple):
-            tmp = list(out) + [None] * (4 - len(out))
-            pi, logp, mu, log_std = tmp[:4]
+        # Actor 호출
+        if deterministic:
+            out = self.actor(
+                obs_atom,
+                atom_type_id=atom_type_id,
+                global_feat=global_feat,
+                deterministic=True,
+            )
         else:
-            pi, logp, mu, log_std = out, None, None, None
+            out = self.actor(
+                obs_atom,
+                atom_type_id=atom_type_id,
+                global_feat=global_feat,
+                deterministic=False,
+            )
 
-        if deterministic and (mu is not None):
-            actions = mu
-        else:
-            actions = pi
-
+        actions, _, _, _ = out
         self.actor.train()
         return actions
 
@@ -301,7 +306,7 @@ class MultiAgentSAC:
         -------
         batch_torch : Dict[str, torch.Tensor]
         idxs        : np.ndarray or None  (PER priority update용)
-        weights_t   : torch.Tensor        (B, 1)
+        weights_t   : torch.Tensor or None
         """
         batch, idxs, weights = self.replay_buffer.sample(batch_size)
 
@@ -320,17 +325,56 @@ class MultiAgentSAC:
         next_obs = to_tensor(batch["next_obs"], dtype=torch.float32)
         done = to_tensor(batch["done"], dtype=torch.float32).view(-1, 1)
 
+        B = obs.shape[0]
+
         atom_type = to_tensor(batch.get("atom_type", None), dtype=torch.long)
         next_atom_type = to_tensor(batch.get("next_atom_type", None), dtype=torch.long)
+
         global_feat = to_tensor(batch.get("global", None), dtype=torch.float32)
         next_global = to_tensor(batch.get("next_global", None), dtype=torch.float32)
+
+        # ★ global_dim에 맞게 None / shape 보정
+        if self.global_dim <= 0:
+            global_feat = None
+            next_global = None
+        else:
+            if global_feat is None:
+                global_feat = torch.zeros(
+                    (B, self.global_dim), dtype=torch.float32, device=self.device
+                )
+            elif global_feat.shape[-1] != self.global_dim:
+                # 길이가 다르면 잘라내거나 패딩 (여기서는 자르거나 0패딩)
+                cur = global_feat.shape[-1]
+                if cur > self.global_dim:
+                    global_feat = global_feat[..., : self.global_dim]
+                else:
+                    pad = self.global_dim - cur
+                    pad_tensor = torch.zeros(
+                        (B, pad), dtype=torch.float32, device=self.device
+                    )
+                    global_feat = torch.cat([global_feat, pad_tensor], dim=-1)
+
+            if next_global is None:
+                next_global = torch.zeros(
+                    (B, self.global_dim), dtype=torch.float32, device=self.device
+                )
+            elif next_global.shape[-1] != self.global_dim:
+                cur = next_global.shape[-1]
+                if cur > self.global_dim:
+                    next_global = next_global[..., : self.global_dim]
+                else:
+                    pad = self.global_dim - cur
+                    pad_tensor = torch.zeros(
+                        (B, pad), dtype=torch.float32, device=self.device
+                    )
+                    next_global = torch.cat([next_global, pad_tensor], dim=-1)
 
         if weights is not None:
             weights_t = to_tensor(weights, dtype=torch.float32).view(-1, 1)
         else:
             weights_t = None
 
-        # per_use_weights=False 이거나 weights가 없으면 importance weight를 1로 처리
+        # per_use_weights=False면 importance weight를 1로 처리
         if not self.per_use_weights or weights_t is None:
             weights_t = torch.ones_like(rews, device=self.device)
 
@@ -347,7 +391,7 @@ class MultiAgentSAC:
             "weights": weights_t,
         }
 
-        # idxs는 PER 업데이트용으로 numpy 그대로 유지 (GPU 텐서로 바꾸지 않음!)
+        # idxs는 PER 업데이트용으로 numpy 그대로 유지 (GPU 텐서로 바꾸지 않음)
         return batch_torch, idxs, weights_t
 
     # ==========================================================
@@ -399,6 +443,7 @@ class MultiAgentSAC:
                 next_obs,
                 atom_type_id=next_atom_type,
                 global_feat=next_global,
+                deterministic=False,
             )
 
             # Q target from target critic
@@ -435,20 +480,13 @@ class MultiAgentSAC:
             torch.nn.utils.clip_grad_norm_(self.critic.parameters(), self.max_grad_norm)
         self.critic_optimizer.step()
 
-        # PER priority update (update_priority / update_priorities 둘 다 지원)
-        if idxs is not None:
-            if hasattr(self.replay_buffer, "update_priority"):
-                with torch.no_grad():
-                    new_priorities = (
-                        td_error.abs().squeeze(-1).detach().cpu().numpy()
-                    )
-                self.replay_buffer.update_priority(idxs, new_priorities)
-            elif hasattr(self.replay_buffer, "update_priorities"):
-                with torch.no_grad():
-                    new_priorities = (
-                        td_error.abs().squeeze(-1).detach().cpu().numpy()
-                    )
-                self.replay_buffer.update_priorities(idxs, new_priorities)
+        # PER priority update
+        if idxs is not None and hasattr(self.replay_buffer, "update_priority"):
+            with torch.no_grad():
+                new_priorities = (
+                    td_error.abs().squeeze(-1).detach().cpu().numpy()
+                )
+            self.replay_buffer.update_priority(idxs, new_priorities)
 
         # ------------------------------------------------------
         # 2) Actor update
@@ -459,6 +497,7 @@ class MultiAgentSAC:
             obs,
             atom_type_id=atom_type,
             global_feat=global_feat,
+            deterministic=False,
         )
         q1_pi, q2_pi = self.critic(
             obs,
@@ -567,7 +606,7 @@ class MultiAgentSAC:
             "actor": self.actor.state_dict(),
             "critic": self.critic.state_dict(),
             "critic_target": self.critic_target.state_dict(),
-            "log_alpha": self.log_alpha.detach().cpu(),  # log(alpha) 그대로 저장
+            "log_alpha": self.log_alpha.detach().cpu(),
             "train_step": self.train_step,
             "actor_opt": self.actor_optimizer.state_dict(),
             "critic_opt": self.critic_optimizer.state_dict(),
@@ -595,10 +634,12 @@ class MultiAgentSAC:
         self.critic_target.load_state_dict(state["critic_target"], strict=strict)
 
         if "log_alpha" in state:
-            loaded_log_alpha = state["log_alpha"]
-            if isinstance(loaded_log_alpha, torch.Tensor):
-                loaded_log_alpha = loaded_log_alpha.to(self.device)
-            self.log_alpha.data = loaded_log_alpha.clamp_(min=-20.0, max=2.0)
+            loaded_alpha = state["log_alpha"]
+            if isinstance(loaded_alpha, torch.Tensor):
+                loaded_alpha = loaded_alpha.to(self.device)
+            # 저장 포맷에 따라 이미 log인지 alpha인지 다를 수 있지만
+            # 여기서는 alpha라고 가정하고 log 취함
+            self.log_alpha.data = loaded_alpha.log().clamp_(min=-20.0, max=2.0)
 
         self.train_step = int(state.get("train_step", 0))
 
