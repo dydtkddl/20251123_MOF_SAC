@@ -16,7 +16,8 @@
 #                               boundary proximity, pore-lining flag
 # - _obs(): per-atom obs_i + k-NN neighbor features → obs_atom (N, FEAT)
 # - reset() → (obs_atom, obs_global_flat)
-# - step(actions) → (next_obs_atom, next_obs_global_flat, reward_scalar, done, reason, Etot_stub, Fmax)
+# - step(actions) → (next_obs_atom, next_obs_global_flat, reward_scalar, done,
+#                    reason, Etot_stub, Fmax)
 ###############################################################
 
 import logging
@@ -37,67 +38,98 @@ class MOFEnv:
     - 각 step에서:
         actions: shape (N, 3) in [-1, 1]
         내부적으로 MACS-style scaling으로 displacement 결정 후 구조 업데이트
-        reward: log|F| 감소 + COM drift / bond break / fmax / max_steps 조건 반영
+        reward: log|F| 감소 + COM drift / bond stretch / fmax / max_steps 조건 반영
     """
 
     def __init__(
         self,
         atoms_loader,
-        max_steps: int = 300,
-        disp_scale: float = 0.03,
+        k_neighbors: int = 12,
         cmax: float = 0.40,
+        max_steps: int = 300,
         fmax_threshold: float = 0.05,
+        bond_break_ratio: float = 2.4,
+        k_bond: float = 3.0,
+        max_penalty: float = 10.0,
         com_threshold: float = 0.25,
         com_lambda: float = 4.0,
-        bond_break_ratio: float = 2.4,
-        bond_lambda: float = 2.0,
         w_force: float = 1.0,
-        k_neighbors: int = 12,
         cutoff_factor: float = 0.8,
+        debug_bond: bool = False,
+        disp_scale: Optional[float] = None,
     ):
         """
         Parameters
         ----------
         atoms_loader : callable
             호출 시 ASE Atoms를 반환하는 함수 (에너지/힘 calculator는 이미 붙어 있어야 함).
-        max_steps : int
-            에피소드 최대 스텝 수.
-        disp_scale : float
-            MACS-style displacement scale (c_i 상한).
-        cmax : float
-            과거 구현 호환용. 현재는 disp_scale로 대체.
-        fmax_threshold : float
-            구조 최적화 성공 판정 기준 (max |F| < threshold).
-        com_threshold : float
-            COM drift 기준. 초과 시 done="com".
-        com_lambda : float
-            COM penalty 강도.
-        bond_break_ratio : float
-            초기 bond 길이에 대한 허용 배수. 초과 시 done="bond".
-        bond_lambda : float
-            bond break penalty 강도.
-        w_force : float
-            force 최적화 reward weight (현재는 1.0으로 직접 곱하지 않고 log|F| 차이를 기본 reward로 사용).
+
         k_neighbors : int
             per-atom 이웃 수 (MACS-style kNN).
+
+        cmax : float
+            MACS-style displacement 상한 (기본값). disp_scale이 따로 주어지지 않으면
+            base_disp_scale = cmax 로 사용됨.
+
+        max_steps : int
+            에피소드 최대 스텝 수.
+
+        fmax_threshold : float
+            구조 최적화 성공 판정 기준 (max |F| < threshold).
+
+        bond_break_ratio : float
+            초기 bond 길이에 대한 허용 배수. d / d0 > bond_break_ratio 이면
+            bond penalty 부여 + done="bond".
+
+        k_bond : float
+            bond stretch penalty 강도 (선형 스프링 계수).
+
+        max_penalty : float
+            bond penalty soft cap (penalty = min(k_bond * over, max_penalty)).
+
+        com_threshold : float
+            COM drift 기준. 초과 시 done="com".
+
+        com_lambda : float
+            COM penalty 강도.
+
+        w_force : float
+            force 최적화 reward weight (현재는 log|F| 차이를 기본 reward로 사용하므로
+            대부분 1.0, 필요 시 스케일링에 사용 가능).
+
         cutoff_factor : float
             neighbor_list cutoff = cutoff_factor * min(cell length).
+
+        debug_bond : bool
+            True이면 bond stretch 관련 디버그 로그를 추가로 남김.
+
+        disp_scale : Optional[float]
+            명시적으로 MACS-style displacement 상한을 따로 지정하고 싶을 때 사용.
+            None이면 base_disp_scale = cmax 로 설정.
         """
         self.loader = atoms_loader
         self.max_steps = max_steps
 
-        self.base_disp_scale = disp_scale
+        # displacement 관련
         self.cmax = cmax
+        self.base_disp_scale = disp_scale if disp_scale is not None else cmax
 
+        # termination / penalty 설정
         self.fmax_threshold = fmax_threshold
         self.com_threshold = com_threshold
         self.com_lambda = com_lambda
+
         self.bond_break_ratio = bond_break_ratio
-        self.bond_lambda = bond_lambda
+        self.k_bond = k_bond
+        self.max_penalty = max_penalty
         self.w_force = w_force
 
+        # neighbor / cutoff
         self.k = k_neighbors
         self.cutoff_factor = cutoff_factor
+
+        # debug
+        self.debug_bond = debug_bond
 
         # 내부 state 초기화
         self.atoms = None
@@ -379,7 +411,11 @@ class MOFEnv:
             neigh[j].append(i)
         return neigh
 
-    def _atom_roles(self, CN: Optional[np.ndarray] = None, planar: Optional[np.ndarray] = None) -> np.ndarray:
+    def _atom_roles(
+        self,
+        CN: Optional[np.ndarray] = None,
+        planar: Optional[np.ndarray] = None,
+    ) -> np.ndarray:
         """
         Atom-level role flags:
             [is_metal,
@@ -545,16 +581,14 @@ class MOFEnv:
 
         # distance to nearest periodic boundary (0 or 1)
         # small value → boundary 근처
-        boundary_prox = np.min(np.stack([frac, 1.0 - frac], axis=-1), axis=-1)
+        boundary_prox = np.min(
+            np.stack([frac, 1.0 - frac], axis=-1), axis=-1
+        )
         min_boundary = np.min(boundary_prox, axis=1)
 
         # 대략적인 pore-lining flag:
         #  - center에서 어느 정도 떨어져 있고
         #  - boundary에 너무 붙어있지는 않은 값
-        # 여기서는 간단히: dist_center가 중간 이상이고 boundary proximity가 일정 이상인 경우
-        # ( 경험적으로 threshold 는 조금 넉넉하게 )
-        # dist_center ~0.0 (center), ~0.866 (corner)
-        # pore-lining은 중간대 (~0.3~0.7) 가정
         is_pore_lining = (
             (dist_center > 0.3) & (dist_center < 0.9) &
             (min_boundary > 0.1)
@@ -697,7 +731,9 @@ class MOFEnv:
         """
         self.atoms = self.loader()
         self.N = len(self.atoms)
-        self.atomic_numbers = np.array([a.number for a in self.atoms], dtype=int)
+        self.atomic_numbers = np.array(
+            [a.number for a in self.atoms], dtype=int
+        )
 
         self.forces = self.atoms.get_forces().astype(np.float32)
         self.bond_pairs, self.bond_d0 = self._detect_bonds()
@@ -741,7 +777,9 @@ class MOFEnv:
         F_old = self.forces
         old_norm = np.linalg.norm(F_old, axis=1) + 1e-12
 
-        # MACS Eq.4 scaling: c_i = min( |F_i|, disp_scale )
+        # --------------------------------------------------------------
+        # 0) MACS Eq.4 scaling: c_i = min( |F_i|, base_disp_scale )
+        # --------------------------------------------------------------
         c_i = np.minimum(old_norm, self.base_disp_scale)
 
         u = np.clip(action_u, -1.0, 1.0)
@@ -775,21 +813,56 @@ class MOFEnv:
             obs_atom = self._obs()
             obs_global = self.flatten_obs(obs_atom)
             logger.debug(
-                f"[MOFEnv.step] done='com', step={self.step_count}, dCOM={dCOM:.4f}, "
-                f"reward={reward_scalar:.4f}"
+                f"[MOFEnv.step] done='com', step={self.step_count}, "
+                f"dCOM={dCOM:.4f}, reward={reward_scalar:.4f}"
             )
-            return obs_atom, obs_global, reward_scalar, True, "com", 0.0, float(new_norm.max())
+            return (
+                obs_atom,
+                obs_global,
+                reward_scalar,
+                True,
+                "com",
+                0.0,
+                float(new_norm.max()),
+            )
 
         # --------------------------------------------------------------
-        # 3) Bond break penalty + termination
+        # 3) Bond stretch penalty + termination
+        #    - ratio = d / d0
+        #    - if ratio > bond_break_ratio:
+        #        over    = ratio - bond_break_ratio
+        #        penalty = min(k_bond * over, max_penalty)
+        #        reward -= penalty
+        #        done = True, reason="bond"
         # --------------------------------------------------------------
+        Fmax = float(new_norm.max())
         for idx, (i, j) in enumerate(self.bond_pairs):
             v = self._pbc_vec(i, j)
             d = np.linalg.norm(v)
-            ratio = d / self.bond_d0[idx]
+            ratio = d / (self.bond_d0[idx] + 1e-12)
+
             if ratio > self.bond_break_ratio:
                 over = ratio - self.bond_break_ratio
-                reward_scalar += -self.bond_lambda * np.log1p(over)
+                penalty = self.k_bond * over
+                if penalty > self.max_penalty:
+                    penalty = self.max_penalty
+                reward_scalar -= penalty
+
+                if self.debug_bond:
+                    logger.debug(
+                        "[MOFEnv.step][bond] step=%d, i=%d, j=%d, "
+                        "d0=%.4f, d=%.4f, ratio=%.3f, over=%.3f, "
+                        "penalty=%.3f",
+                        self.step_count,
+                        i,
+                        j,
+                        self.bond_d0[idx],
+                        d,
+                        ratio,
+                        over,
+                        penalty,
+                    )
+
                 self.F_prev = new_F.copy()
                 self.forces = new_F
                 obs_atom = self._obs()
@@ -798,12 +871,19 @@ class MOFEnv:
                     f"[MOFEnv.step] done='bond', step={self.step_count}, "
                     f"ratio={ratio:.3f}, reward={reward_scalar:.4f}"
                 )
-                return obs_atom, obs_global, reward_scalar, True, "bond", 0.0, float(new_norm.max())
+                return (
+                    obs_atom,
+                    obs_global,
+                    reward_scalar,
+                    True,
+                    "bond",
+                    0.0,
+                    Fmax,
+                )
 
         # --------------------------------------------------------------
         # 4) Fmax termination
         # --------------------------------------------------------------
-        Fmax = float(new_norm.max())
         if Fmax < self.fmax_threshold:
             self.F_prev = new_F.copy()
             self.forces = new_F
@@ -813,7 +893,15 @@ class MOFEnv:
                 f"[MOFEnv.step] done='fmax', step={self.step_count}, "
                 f"Fmax={Fmax:.4e}, reward={reward_scalar:.4f}"
             )
-            return obs_atom, obs_global, reward_scalar, True, "fmax", 0.0, Fmax
+            return (
+                obs_atom,
+                obs_global,
+                reward_scalar,
+                True,
+                "fmax",
+                0.0,
+                Fmax,
+            )
 
         # --------------------------------------------------------------
         # 5) max-step termination
@@ -827,7 +915,15 @@ class MOFEnv:
                 f"[MOFEnv.step] done='max_steps', step={self.step_count}, "
                 f"Fmax={Fmax:.4e}, reward={reward_scalar:.4f}"
             )
-            return obs_atom, obs_global, reward_scalar, True, "max_steps", 0.0, Fmax
+            return (
+                obs_atom,
+                obs_global,
+                reward_scalar,
+                True,
+                "max_steps",
+                0.0,
+                Fmax,
+            )
 
         # --------------------------------------------------------------
         # 6) Normal step
@@ -838,7 +934,16 @@ class MOFEnv:
         obs_global = self.flatten_obs(obs_atom)
 
         logger.debug(
-            f"[MOFEnv.step] step={self.step_count}, Fmax={Fmax:.4e}, reward={reward_scalar:.4f}"
+            f"[MOFEnv.step] step={self.step_count}, "
+            f"Fmax={Fmax:.4e}, reward={reward_scalar:.4f}"
         )
 
-        return obs_atom, obs_global, reward_scalar, False, None, 0.0, Fmax
+        return (
+            obs_atom,
+            obs_global,
+            reward_scalar,
+            False,
+            None,
+            0.0,
+            Fmax,
+        )
