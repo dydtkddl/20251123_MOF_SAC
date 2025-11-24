@@ -246,10 +246,11 @@ for ep in range(EPOCHS):
         ################################################################
         # 4) LOGGING
         ################################################################
+        alpha_val = float(agent.alpha.detach().cpu())
         tqdm_bar.set_postfix({
             "Fmax": f"{Fmax:.2e}",
             "reward": f"{reward_scalar:.4f}",
-            "alpha": f"{agent.alpha:.4f}"
+            "alpha": f"{alpha_val:.4f}"
         })
 
         ep_ret += reward_scalar
