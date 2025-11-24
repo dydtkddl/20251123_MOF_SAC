@@ -1,418 +1,350 @@
 import numpy as np
-from ase.neighborlist import neighbor_list
 from ase.data import covalent_radii
+from ase.geometry import find_mic
 
 
+###############################################################
+# Enhanced MOFEnv (Action = scale × (-normalized_force))
+# Including extra structure features without external tools
+###############################################################
 class MOFEnv:
 
-    # ============================================================
     def __init__(
         self,
         atoms_loader,
-        k_neighbors=12,
-        cmax=0.4,
         max_steps=300,
+        disp_scale=0.03,
         fmax_threshold=0.05,
+        com_threshold=0.30,
+        com_lambda=10.0,
         bond_break_ratio=2.4,
-        k_bond=3.0,
-        max_penalty=10.0,
-        debug_bond=False,
+        bond_lambda=5.0,
+        w_force=1.0,
+        w_energy=0.1,
     ):
-        self.atoms_loader = atoms_loader
-
-        self.k = k_neighbors
-        self.cmax = cmax
+        self.loader = atoms_loader
         self.max_steps = max_steps
+        self.disp_scale = disp_scale
         self.fmax_threshold = fmax_threshold
 
-        # Bond-related
+        self.com_threshold = com_threshold
+        self.com_lambda = com_lambda
+
         self.bond_break_ratio = bond_break_ratio
-        self.k_bond = k_bond
-        self.max_penalty = max_penalty
-        self.debug_bond = debug_bond
+        self.bond_lambda = bond_lambda
 
-        # COM control
-        self.com_threshold = 0.30
-        self.com_lambda = 20.0
+        self.w_force = w_force
+        self.w_energy = w_energy
 
-        self.feature_dim = None
         self.reset()
 
-    # ============================================================
-    # True Bonds
-    # ============================================================
-    def _detect_true_bonds(self, atoms):
 
-        i, j, offsets = neighbor_list("ijS", atoms, cutoff=4.0)
-
-        pos = atoms.positions
-        cell = atoms.cell
-
-        bond_pairs = []
-        bond_d0 = []
-
-        for a, b, off in zip(i, j, offsets):
-            rel = pos[b] + off @ cell - pos[a]
-            d = np.linalg.norm(rel)
-
-            rc = covalent_radii[atoms[a].number] + covalent_radii[atoms[b].number]
-
-            if d <= rc + 0.4:
-                bond_pairs.append((a, b))
-                bond_d0.append(d)
-
-        return np.array(bond_pairs, int), np.array(bond_d0, float)
-
-    # ============================================================
-    # Aromatic detection
-    # ============================================================
-    def _detect_aromatic_nodes(self, adj, Z):
-        N = len(Z)
-        aromatic = set()
-        visited = set()
-
-        def canonical(cycle):
-            L = len(cycle)
-            seqs = []
-            for r in range(L):
-                seqs.append(tuple(cycle[r:] + cycle[:r]))
-            rev = list(reversed(cycle))
-            for r in range(L):
-                seqs.append(tuple(rev[r:] + rev[:r]))
-            return min(seqs)
-
-        def dfs(s, path, depth):
-            if depth > 6:
-                return
-            last = path[-1]
-
-            for nxt in adj[last]:
-                if nxt == s and depth == 6:
-                    cyc = canonical(path.copy())
-                    if cyc not in visited:
-                        if all(Z[x] == 6 and len(adj[x]) <= 3 for x in cyc):
-                            aromatic.update(cyc)
-                        visited.add(cyc)
-                elif nxt > s and nxt not in path:
-                    dfs(s, path + [nxt], depth + 1)
-
-        for s in range(N):
-            if Z[s] == 6 and len(adj[s]) <= 3:
-                dfs(s, [s], 1)
-
-        return aromatic
-
-    # ============================================================
-    def _assign_metal_flags(self, Z):
-        MOF_METALS = {12,13,20,22,23,24,25,26,27,28,29,30,40,72}
-        return np.array([1.0 if z in MOF_METALS else 0.0 for z in Z], float)
-
-    def _detect_carboxylate_O(self, Z, adj, is_metal):
-        N = len(Z)
-        out = np.zeros(N, float)
-
-        for O in range(N):
-            if Z[O] != 8:
-                continue
-            for C in adj[O]:
-                if Z[C] != 6:
-                    continue
-
-                O_list = [x for x in adj[C] if Z[x] == 8]
-                if len(O_list) != 2:
-                    continue
-
-                if sum(is_metal[n] for n in adj[C]) >= 1:
-                    out[O] = 1.0
-                    break
-
-        return out
-
-    def _detect_mu_oxygens(self, Z, adj, is_metal):
-        N = len(Z)
-        mu2 = np.zeros(N, float)
-        mu3 = np.zeros(N, float)
-
-        for O in range(N):
-            if Z[O] != 8:
-                continue
-            m = sum(is_metal[n] for n in adj[O])
-            if m == 2:
-                mu2[O] = 1.0
-            elif m >= 3:
-                mu3[O] = 1.0
-        return mu2, mu3
-
-    # ============================================================
-    # RESET
-    # ============================================================
-    def reset(self):
-        self.atoms = self.atoms_loader()
-        self.N = len(self.atoms)
-
-        self.forces = self.atoms.get_forces().astype(np.float32)
-        self.prev_forces = np.zeros_like(self.forces)
-        self.prev_disp = np.zeros_like(self.forces)
-
-        Z = np.array([a.number for a in self.atoms])
-        self.covalent_radii = np.array([covalent_radii[z] for z in Z]).astype(np.float32)
-
-        self.bond_pairs, self.bond_d0 = self._detect_true_bonds(self.atoms)
-        print(f"[INIT] Detected true bonds = {len(self.bond_pairs)}")
-
-        # adjacency
-        self.adj = {i:[] for i in range(self.N)}
-        for a, b in self.bond_pairs:
-            self.adj[a].append(b)
-            self.adj[b].append(a)
-
-        aromatic_nodes = self._detect_aromatic_nodes(self.adj, Z)
-        self.is_aromatic = np.zeros(self.N, float)
-        self.is_aromatic[list(aromatic_nodes)] = 1.0
-
-        self.is_metal = self._assign_metal_flags(Z)
-        self.is_carboxylate_O = self._detect_carboxylate_O(Z, self.adj, self.is_metal)
-        self.is_mu2O, self.is_mu3O = self._detect_mu_oxygens(Z, self.adj, self.is_metal)
-
-        self.is_aromatic_C = np.zeros(self.N, float)
-        for i in range(self.N):
-            if Z[i] == 6 and self.is_aromatic[i] == 1.0:
-                self.is_aromatic_C[i] = 1.0
-
-        self.is_linker = np.zeros(self.N, float)
-        for i in range(self.N):
-            if (
-                (not self.is_metal[i])
-                and (not self.is_carboxylate_O[i])
-                and (not self.is_aromatic_C[i])
-                and Z[i] in [6,7]
-            ):
-                self.is_linker[i] = 1.0
-
-        self.bond_types = np.zeros((self.N,6), float)
-
-        for a, b in self.bond_pairs:
-            Za, Zb = Z[a], Z[b]
-
-            if self.is_metal[a] and Zb == 8: self.bond_types[a][0] += 1
-            if self.is_metal[b] and Za == 8: self.bond_types[b][0] += 1
-
-            if self.is_metal[a] and Zb == 7: self.bond_types[a][1] += 1
-            if self.is_metal[b] and Za == 7: self.bond_types[b][1] += 1
-
-            if self.is_carboxylate_O[a]: self.bond_types[b][2] += 1
-            if self.is_carboxylate_O[b]: self.bond_types[a][2] += 1
-
-            if self.is_aromatic_C[a] and self.is_aromatic_C[b]:
-                self.bond_types[a][3] += 1
-                self.bond_types[b][3] += 1
-
-            if self.is_mu2O[a]: self.bond_types[b][4] += 1
-            if self.is_mu2O[b]: self.bond_types[a][4] += 1
-
-            if self.is_mu3O[a]: self.bond_types[b][5] += 1
-            if self.is_mu3O[b]: self.bond_types[a][5] += 1
-
-        self.feature_dim = len(self._make_feature(0))
-        self.step_count = 0
-
-        self.COM_prev = self.atoms.positions.mean(axis=0).astype(np.float32)
-
-        return self._obs()
-
-    # ============================================================
+    ##################################################################
+    # Utility: PBC-aware vector
+    ##################################################################
     def _rel_vec(self, i, j):
-        disp = self.atoms.positions[j] - self.atoms.positions[i]
+        pos = self.atoms.positions
         cell = self.atoms.cell.array
-        frac = np.linalg.solve(cell.T, disp)
+        raw = pos[j] - pos[i]
+        frac = np.linalg.solve(cell.T, raw)
         frac -= np.round(frac)
         return frac @ cell
 
-    # ============================================================
-    # Hops 1–3
-    # ============================================================
-    def _get_hop_sets(self, idx, max_hop=3):
-        visited = set([idx])
-        frontier = [idx]
-        hop_map = {1:[], 2:[], 3:[]}
 
-        for hop in range(1, max_hop+1):
-            nxt_frontier=[]
-            for node in frontier:
-                for nxt in self.adj[node]:
-                    if nxt not in visited:
-                        visited.add(nxt)
-                        nxt_frontier.append(nxt)
-                        hop_map[hop].append(nxt)
-            frontier = nxt_frontier
+    ##################################################################
+    # Detect true bonds using covalent radii
+    ##################################################################
+    def _detect_bonds(self):
+        pos = self.atoms.positions
+        Z = self.atomic_numbers
+        N = self.N
 
-        return hop_map
+        bonds = []
+        d0 = []
 
-    # ============================================================
-    # Feature
-    # ============================================================
-    def _make_feature(self, idx):
+        for i in range(N):
+            for j in range(i + 1, N):
+                rc = covalent_radii[Z[i]] + covalent_radii[Z[j]] + 0.3
+                d = np.linalg.norm(self._rel_vec(i, j))
+                if d <= rc:
+                    bonds.append((i, j))
+                    d0.append(d)
 
-        ri = self.covalent_radii[idx]
-        gi = self.forces[idx]
-        gprev = self.prev_forces[idx]
+        return np.array(bonds), np.array(d0)
 
-        gnorm = max(np.linalg.norm(gi), 1e-12)
 
-        core = np.concatenate([
-            np.array([ri, min(gnorm, self.cmax), np.log(gnorm+1e-6)]),
-            gi,
-            self.prev_disp[idx],
-            gi - gprev,
-        ])
+    ##################################################################
+    # Compute coordination number
+    ##################################################################
+    def _coordination_numbers(self):
+        CN = np.zeros(self.N)
+        for (i, j) in self.bond_pairs:
+            CN[i] += 1
+            CN[j] += 1
+        return CN
 
-        roles = np.array([
-            self.is_aromatic[idx],
-            self.is_metal[idx],
-            self.is_linker[idx],
-            self.is_carboxylate_O[idx],
-            self.is_mu2O[idx],
-            self.is_mu3O[idx],
-        ])
 
-        return np.concatenate([core, roles, self.bond_types[idx]])
+    ##################################################################
+    # Local planarity (aromatic-like measure)
+    ##################################################################
+    def _local_planarity(self):
+        pos = self.atoms.positions
+        planar = np.zeros(self.N)
 
-    # ============================================================
-    # Observation
-    # ============================================================
-    def _obs(self):
-
-        obs_list = []
-
+        # simple 3-neighbor approximation
         for i in range(self.N):
+            neigh = np.where(self.bond_pairs[:,0] == i)[0].tolist() + \
+                    np.where(self.bond_pairs[:,1] == i)[0].tolist()
 
-            fi = self._make_feature(i)
-            hop_sets = self._get_hop_sets(i)
+            neigh_atoms = set()
+            for idx in neigh:
+                a, b = self.bond_pairs[idx]
+                neigh_atoms.add(a)
+                neigh_atoms.add(b)
+            neigh_atoms.discard(i)
+            neigh_atoms = list(neigh_atoms)
 
-            selected = []
+            if len(neigh_atoms) < 3:
+                continue
 
-            for j in hop_sets[1]:
-                if len(selected) < self.k:
-                    selected.append(j)
+            # choose three neighbors
+            a, b, c = neigh_atoms[:3]
 
-            for j in hop_sets[2]:
-                if len(selected) < self.k:
-                    selected.append(j)
+            v1 = pos[a] - pos[i]
+            v2 = pos[b] - pos[i]
+            v3 = pos[c] - pos[i]
 
-            remain = self.k - len(selected)
-            if remain > 0 and len(hop_sets[3]) > 0:
-                cand = hop_sets[3]
-                if len(cand) <= remain:
-                    selected += cand
-                else:
-                    selected += list(np.random.choice(cand, remain, False))
+            normal1 = np.cross(v1, v2)
+            normal2 = np.cross(v1, v3)
 
-            while len(selected) < self.k:
-                selected.append(None)
+            if np.linalg.norm(normal1) < 1e-8 or np.linalg.norm(normal2) < 1e-8:
+                continue
 
-            nbr_feats = []
-            dists = []
-            vecs = []
+            cosang = np.dot(normal1, normal2) / (np.linalg.norm(normal1) * np.linalg.norm(normal2))
+            planar[i] = abs(cosang)
 
-            for j in selected:
-                if j is None:
-                    nbr_feats.append(np.zeros_like(fi))
-                    dists.append(0.0)
-                    vecs.append(np.zeros(3))
-                else:
-                    fj = self._make_feature(j)
-                    rel = self._rel_vec(i, j)
-                    nbr_feats.append(fj)
-                    dists.append(np.linalg.norm(rel))
-                    vecs.append(rel)
+        return planar
 
-            block = [fi] + nbr_feats
-            block.append(np.array(dists))
-            block.append(np.array(vecs).reshape(-1))
 
-            obs_list.append(np.concatenate(block))
+    ##################################################################
+    # Local graph radius (sum of distances to bonded neighbors)
+    ##################################################################
+    def _local_graph_radius(self):
+        pos = self.atoms.positions
+        R = np.zeros(self.N)
 
-        return np.array(obs_list, float)
+        for (i, j) in self.bond_pairs:
+            d = np.linalg.norm(self._rel_vec(i, j))
+            R[i] += d
+            R[j] += d
 
-    # ============================================================
-    # STEP (Stable RL version + done_reason added)
-    # ============================================================
-    def step(self, action):
+        return R
 
+
+    ##################################################################
+    # Local stiffness proxy: |F| / |disp_last|
+    ##################################################################
+    def _local_stiffness(self):
+        if self.disp_last is None:
+            return np.zeros(self.N)
+
+        disp_mag = np.linalg.norm(self.disp_last, axis=1) + 1e-12
+        force_mag = np.linalg.norm(self.forces, axis=1)
+
+        return force_mag / disp_mag
+
+
+    ##################################################################
+    # Torsion angle feature for each atom (approx)
+    ##################################################################
+    def _torsion_feature(self):
+        pos = self.atoms.positions
+        tors = np.zeros(self.N)
+
+        # very simple dihedral for quadruplets (i - nb1 - nb2 - nb3)
+        for i in range(self.N):
+            neigh = np.where(self.bond_pairs[:,0] == i)[0].tolist() + \
+                    np.where(self.bond_pairs[:,1] == i)[0].tolist()
+
+            neigh_atoms = set()
+            for idx in neigh:
+                a, b = self.bond_pairs[idx]
+                neigh_atoms.add(a)
+                neigh_atoms.add(b)
+            neigh_atoms.discard(i)
+            neigh_atoms = list(neigh_atoms)
+
+            if len(neigh_atoms) < 3:
+                continue
+
+            a, b, c = neigh_atoms[:3]
+            p0, p1, p2, p3 = pos[a], pos[i], pos[b], pos[c]
+
+            b0 = - (p1 - p0)
+            b1 = p2 - p1
+            b2 = p3 - p2
+
+            n1 = np.cross(b0, b1)
+            n2 = np.cross(b1, b2)
+
+            if np.linalg.norm(n1) < 1e-8 or np.linalg.norm(n2) < 1e-8:
+                continue
+
+            x = np.dot(n1, n2)
+            y = np.dot(np.cross(n1, n2), b1 / (np.linalg.norm(b1) + 1e-12))
+            tors[i] = np.arctan2(y, x)  # dihedral angle
+
+        return tors
+
+
+    ##################################################################
+    # Local stress proxy: |F| × CN
+    ##################################################################
+    def _local_stress(self, CN):
+        force_mag = np.linalg.norm(self.forces, axis=1)
+        return force_mag * CN
+
+
+    ##################################################################
+    # SBU-level grouping (metal cluster ID)
+    ##################################################################
+    def _sbu_id(self):
+        Z = self.atomic_numbers
+        metals = set([20, 22, 23, 24, 25, 26, 27, 28, 29, 40, 42, 44])
+        sbu = np.zeros(self.N)
+
+        cluster_id = 1
+        for i in range(self.N):
+            if Z[i] in metals:
+                sbu[i] = cluster_id
+                cluster_id += 1
+
+        return sbu
+
+
+    ##################################################################
+    # Observation vector: all features
+    ##################################################################
+    def _obs(self):
+        F = self.forces
+        f_norm = np.linalg.norm(F, axis=1, keepdims=True) + 1e-12
+        f_unit = F / f_norm
+
+        CN = self._coordination_numbers().reshape(-1, 1)
+        planar = self._local_planarity().reshape(-1, 1)
+        graphR = self._local_graph_radius().reshape(-1, 1)
+        stiff = self._local_stiffness().reshape(-1, 1)
+        tors = self._torsion_feature().reshape(-1, 1)
+        stress = self._local_stress(CN.flatten()).reshape(-1, 1)
+        sbu = self._sbu_id().reshape(-1, 1)
+
+        global_force_mean = np.mean(f_norm)
+        global_force_std = np.std(f_norm)
+
+        global_f = np.full((self.N, 2), 
+                           [global_force_mean, global_force_std], 
+                           dtype=np.float32)
+
+        energy_norm = np.full((self.N, 1), self.energy, np.float32)
+
+        obs = np.concatenate([
+            f_unit,            # 3
+            f_norm,            # 1
+            CN,                # 1
+            planar,            # 1
+            graphR,            # 1
+            stiff,             # 1
+            tors,              # 1
+            stress,            # 1
+            sbu,               # 1
+            energy_norm,       # 1
+            global_f,          # 2
+        ], axis=1)
+
+        return obs.astype(np.float32)
+
+
+    ##################################################################
+    # Reset
+    ##################################################################
+    def reset(self):
+        self.atoms = self.loader()
+        self.N = len(self.atoms)
+        self.atomic_numbers = np.array([a.number for a in self.atoms])
+
+        self.forces = self.atoms.get_forces().astype(np.float32)
+        self.energy = float(self.atoms.get_potential_energy())
+
+        self.bond_pairs, self.bond_d0 = self._detect_bonds()
+
+        self.com_prev = self.atoms.positions.mean(axis=0)
+        self.disp_last = None
+        self.step_count = 0
+
+        return self._obs()
+
+
+    ##################################################################
+    # Step
+    ##################################################################
+    def step(self, action_scale):
         self.step_count += 1
-        action = np.clip(action, -1.0, 1.0)
 
-        # --------------------------------------
-        # 1) Force-adaptive displacement
-        # --------------------------------------
-        gnorm = np.linalg.norm(self.forces, axis=1)
-        scale = np.minimum(gnorm, self.cmax).reshape(-1, 1)
+        scale = np.clip(action_scale, 0.0, 1.0)
+        F = self.forces
+        Fnorm = np.linalg.norm(F, axis=1, keepdims=True) + 1e-12
+        Funit = F / Fnorm
 
-        disp = 0.003 * action * (scale / self.cmax)
+        disp = -self.disp_scale * scale * Funit
+        self.disp_last = disp.copy()
+
         self.atoms.positions += disp
 
+        # Re-evaluate
         new_forces = self.atoms.get_forces().astype(np.float32)
-        old_norm = np.maximum(np.linalg.norm(self.forces, axis=1), 1e-12)
-        new_norm = np.maximum(np.linalg.norm(new_forces, axis=1), 1e-12)
+        new_energy = float(self.atoms.get_potential_energy())
 
-        # --------------------------------------
-        # 2) Force reward  (×10 scaling 적용됨)
-        # --------------------------------------
-        r_f = 10.0 * (np.log(old_norm+1e-6) - np.log(new_norm+1e-6))
-        reward = r_f.copy()
+        # Reward
+        old_norm = np.linalg.norm(F, axis=1)
+        new_norm = np.linalg.norm(new_forces, axis=1)
 
-        # --------------------------------------
-        # 3) COM penalty
-        # --------------------------------------
-        COM_new = self.atoms.positions.mean(axis=0)
-        delta_COM = np.linalg.norm(COM_new - self.COM_prev)
+        r_force = float(np.mean(np.log(old_norm + 1e-12) - np.log(new_norm + 1e-12)))
+        r_energy = (self.energy - new_energy)
 
-        reward -= self.com_lambda * delta_COM
-        self.COM_prev = COM_new.copy()
+        reward = self.w_force * r_force + self.w_energy * r_energy
 
-        if delta_COM > self.com_threshold:
+        # COM drift
+        com_new = self.atoms.positions.mean(axis=0)
+        delta_com = np.linalg.norm(com_new - self.com_prev)
+        reward -= self.com_lambda * delta_com
+        self.com_prev = com_new.copy()
+
+        if delta_com > self.com_threshold:
             return self._obs(), reward, True, "com"
 
-        # --------------------------------------
-        # 4) Bond penalty
-        # --------------------------------------
-        for idx, (a, b) in enumerate(self.bond_pairs):
+        # Bond break
+        for k, (i, j) in enumerate(self.bond_pairs):
+            r = np.linalg.norm(self._rel_vec(i, j))
+            r0 = self.bond_d0[k]
+            ratio = r / r0
 
-            rel = self._rel_vec(a, b)
-            d  = np.linalg.norm(rel)
-            d0 = self.bond_d0[idx]
-            ratio = d / d0
-
-            stretch = max(0.0, ratio - self.bond_break_ratio)
-            compress = max(0.0, 0.6 - ratio)
-
-            penalty = self.k_bond * np.sqrt(stretch**2 + compress**2)
-            penalty = min(penalty, self.max_penalty)
-
-            reward -= penalty
-
-            if ratio > 6.0 or ratio < 0.25:
+            if ratio > self.bond_break_ratio:
+                reward -= self.bond_lambda * (ratio - self.bond_break_ratio)
                 return self._obs(), reward, True, "bond"
 
-        # --------------------------------------
-        # 5) Termination conditions
-        # --------------------------------------
-        if np.mean(new_norm) < self.fmax_threshold:
-            self._update_memory(disp, new_forces)
+        # Convergence
+        if np.max(new_norm) < self.fmax_threshold:
+            self.energy = new_energy
+            self.forces = new_forces
             return self._obs(), reward, True, "fmax"
 
+        # Max steps
         if self.step_count >= self.max_steps:
-            self._update_memory(disp, new_forces)
+            self.energy = new_energy
+            self.forces = new_forces
             return self._obs(), reward, True, "max_steps"
 
-        # --------------------------------------
-        # Normal update
-        # --------------------------------------
-        self._update_memory(disp, new_forces)
-        return self._obs(), reward, False, None
+        self.energy = new_energy
+        self.forces = new_forces
 
-    # ============================================================
-    def _update_memory(self, disp, new_forces):
-        self.prev_disp = disp.copy()
-        self.prev_forces = self.forces.copy()
-        self.forces = new_forces.copy()
+        return self._obs(), reward, False, None
