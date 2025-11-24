@@ -15,8 +15,8 @@ class MOFEnv:
         max_steps=300,
         fmax_threshold=0.05,
         bond_break_ratio=1.8,
-        k_bond=3.0,              # 안정값 (기존 50 → 3)
-        max_penalty=50.0,        # soft cap
+        k_bond=3.0,              # 안정값
+        max_penalty=50.0,        # bond penalty soft cap
         debug_bond=False
     ):
         self.atoms_loader = atoms_loader
@@ -26,14 +26,19 @@ class MOFEnv:
         self.max_steps = max_steps
         self.fmax_threshold = fmax_threshold
 
-        # Soft bond penalty
+        # Bond penalty settings
         self.bond_break_ratio = bond_break_ratio
         self.k_bond = k_bond
         self.max_penalty = max_penalty
         self.debug_bond = debug_bond
 
-        self.feature_dim = None
+        # ============================================================
+        # COM drift control parameters (중요)
+        # ============================================================
+        self.com_threshold = 0.20   # Å 단위 hard termination
+        self.com_lambda = 100.0     # soft penalty strength
 
+        self.feature_dim = None
         self.reset()
 
     # ============================================================
@@ -58,7 +63,7 @@ class MOFEnv:
         return np.array(bond_pairs, dtype=int), np.array(bond_d0, dtype=float)
 
     # ============================================================
-    # AROMATIC (6-cycle)
+    # AROMATIC RING DETECTION
     # ============================================================
     def _detect_aromatic_nodes(self, adj, Z):
         N = len(Z)
@@ -102,7 +107,7 @@ class MOFEnv:
     def _assign_metal_flags(self, Z):
         MOF_METALS = {
             12, 13, 20,
-            22,23,24,25,26,27,28,29,
+            22, 23, 24, 25, 26, 27, 28, 29,
             30, 40, 72
         }
         return np.array([1.0 if z in MOF_METALS else 0.0 for z in Z], dtype=np.float32)
@@ -237,13 +242,13 @@ class MOFEnv:
         self.feature_dim = len(self._make_feature(0))
         self.step_count = 0
 
-        # COM (translation drift 방지용)
+        # Initial COM
         self.COM_prev = self.atoms.positions.mean(axis=0)
 
         return self._obs()
 
     # ============================================================
-    # MIC relative displacement
+    # MIC displacement
     # ============================================================
     def _rel_vec(self, i, j):
         disp = self.atoms.positions[j] - self.atoms.positions[i]
@@ -357,7 +362,6 @@ class MOFEnv:
 
         self.step_count += 1
 
-        # action clipping
         action = np.clip(action, -1.0, 1.0)
 
         gnorm = np.maximum(np.linalg.norm(self.forces, axis=1), 1e-12)
@@ -379,16 +383,22 @@ class MOFEnv:
         reward = r_f
 
         # ============================================================
-        # COM drift penalty (translation suppressor)
+        # COM DRIFT CONTROL
         # ============================================================
         COM_new = self.atoms.positions.mean(axis=0)
         delta_COM = np.linalg.norm(COM_new - self.COM_prev)
 
-        reward -= 200.0 * delta_COM   # 강한 억제
+        # soft penalty
+        reward -= self.com_lambda * delta_COM
+
+        # hard terminate
+        if delta_COM > self.com_threshold:
+            return self._obs(), reward - 100.0, True
+
         self.COM_prev = COM_new.copy()
 
         # ============================================================
-        # Soft bond penalty
+        # BOND PENALTY
         # ============================================================
         for idx, (a, b) in enumerate(self.bond_pairs):
 
@@ -419,3 +429,5 @@ class MOFEnv:
         self.forces = new_forces.copy()
 
         return self._obs(), reward, done
+
+
