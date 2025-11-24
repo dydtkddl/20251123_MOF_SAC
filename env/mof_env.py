@@ -1,5 +1,5 @@
 ###############################################################
-# env/mof_env.py — HYBRID-MACS (Structure-level RL Version)
+# env/mof_env.py — Structure-level MACS RL (FINAL VERSION)
 # - 기존 MACS 물리 로직 100% 유지
 # - reward: scalar (mean Δlog|F|)
 # - obs: per-atom matrix + obs_global(flatten) 제공
@@ -25,8 +25,8 @@ class MOFEnv:
         max_steps=300,
 
         # MACS displacement scale
-        disp_scale=0.03,      # base displacement scaling
-        cmax=0.40,            # max displacement magnitude
+        disp_scale=0.03,
+        cmax=0.40,
 
         # termination criteria
         fmax_threshold=0.05,
@@ -74,7 +74,6 @@ class MOFEnv:
     # PBC minimum-image helpers
     ###################################################################
     def _pbc_vec(self, i, j):
-        """Minimum image vector from atom i → atom j."""
         pos = self.atoms.positions
         cell = self.atoms.cell.array
 
@@ -85,7 +84,6 @@ class MOFEnv:
 
 
     def _pbc_vec_pos(self, pi, pj):
-        """Minimum image vector between raw positions pi → pj."""
         cell = self.atoms.cell.array
         diff = pj - pi
         frac = np.linalg.solve(cell.T, diff)
@@ -359,7 +357,6 @@ class MOFEnv:
         gF_std  = float(np.std(f_norm) + 1e-12)
         logF = np.log(f_norm)
 
-        # Build final f_i
         f = np.concatenate([
             f_unit,                       # 3
             logF[:,None],                 # 1
@@ -388,7 +385,6 @@ class MOFEnv:
         N, k = self.N, self.k
         Fdim = f.shape[1]
 
-        # output obs per atom
         obs = np.zeros((N, Fdim + k*Fdim + k*3 + k), dtype=np.float32)
 
         for i in range(N):
@@ -396,9 +392,9 @@ class MOFEnv:
             neigh_f = f[nbr_idx[i]].reshape(-1)
 
             obs[i] = np.concatenate([
-                f[i],                      
-                neigh_f,                   
-                relpos[i].reshape(-1),     
+                f[i],
+                neigh_f,
+                relpos[i].reshape(-1),
                 dist[i].reshape(-1)
             ])
 
@@ -425,7 +421,6 @@ class MOFEnv:
         self.com_prev = self.atoms.positions.mean(axis=0)
         self.step_count = 0
 
-        # per-atom obs + flatten both 제공
         obs_atom = self._obs()
         obs_global = self.flatten_obs(obs_atom)
         return obs_atom, obs_global
@@ -438,40 +433,33 @@ class MOFEnv:
     def step(self, action_u):
         """
         action_u: shape (N, 3) in [-1,1]^3 (structure-level)
-        displacement d_i = c_i * u_i  (MACS Eq.4)
         """
 
         self.step_count += 1
 
         F_old = self.forces
-        fnorm = np.linalg.norm(F_old, axis=1) + 1e-12
+        old_norm = np.linalg.norm(F_old, axis=1) + 1e-12
 
-        # MACS scaling factor
-        c_i = np.minimum(fnorm, self.base_disp_scale)
+        # MACS Eq.4 scaling
+        c_i = np.minimum(old_norm, self.base_disp_scale)
 
-        # clip action
         u = np.clip(action_u, -1.0, 1.0)
-
-        # displacement
         disp = c_i[:, None] * u
         self.disp_last = disp.copy()
 
-        # apply displacement (PBC)
+        # apply displacement
         self.atoms.positions += disp
 
-        # compute new forces
         new_F = self.atoms.get_forces().astype(np.float32)
         new_norm = np.linalg.norm(new_F, axis=1)
 
 
         ###############################################################
-        # 1) Reward: Δlog|F|
+        # 1) Reward scalar
         ###############################################################
-        old_norm = np.linalg.norm(F_old, axis=1)
-        R_vec = np.log(old_norm + 1e-12) - np.log(new_norm + 1e-12)
+        R_vec = np.log(old_norm) - np.log(new_norm + 1e-12)
         R_vec = np.clip(R_vec, -5, 5)
 
-        # ==== scalar reward ====
         reward_scalar = float(np.mean(R_vec))
 
 
@@ -484,7 +472,6 @@ class MOFEnv:
         reward_scalar -= self.com_lambda * np.tanh(4.0 * dCOM)
         self.com_prev = com_new.copy()
 
-        # termination: COM blowup
         if dCOM > self.com_threshold:
             self.F_prev = new_F.copy()
             self.forces = new_F
@@ -494,7 +481,7 @@ class MOFEnv:
 
 
         ###############################################################
-        # 3) Bond break penalty
+        # 3) Bond break penalty + termination
         ###############################################################
         for idx, (i, j) in enumerate(self.bond_pairs):
             v = self._pbc_vec(i, j)
@@ -515,7 +502,7 @@ class MOFEnv:
 
 
         ###############################################################
-        # 4) Fmax convergence
+        # 4) Fmax termination
         ###############################################################
         Fmax = float(new_norm.max())
         if Fmax < self.fmax_threshold:
@@ -540,7 +527,7 @@ class MOFEnv:
 
 
         ###############################################################
-        # 6) Normal transition
+        # 6) Normal step
         ###############################################################
         self.F_prev = new_F.copy()
         self.forces = new_F
