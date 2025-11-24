@@ -120,18 +120,23 @@ class Actor(nn.Module):
     # Deterministic: obs (np array) → (3,) np vector
     ###############################################################
     @torch.no_grad()
-    def act(self, obs_np: np.ndarray):
+    def act(self, obs):
         """
-        obs_np: numpy array of shape (obs_dim,)
-        return: (3,) numpy float32
+        obs: (obs_dim,) numpy
+        return: (3,) numpy
         """
-        obs = torch.as_tensor(obs_np, dtype=torch.float32).unsqueeze(0)
-        action, _, _, _ = self.forward(obs)
+        if obs.ndim == 1:
+            obs_t = torch.as_tensor(obs, dtype=torch.float32, device=self.device).unsqueeze(0)
+        else:
+            obs_t = torch.as_tensor(obs, dtype=torch.float32, device=self.device)
 
-        # robust shape normalizer (절대 crash 안남)
-        a = action.reshape(-1)[:self.act_dim]     # (3,)
-        return a.cpu().numpy().astype(np.float32)
+        # act_tensor returns (3,) numpy already
+        action_vec = self.actor.act_tensor(obs_t)
 
+        # ensure proper shape
+        action_vec = np.asarray(action_vec).reshape(-1)[:3]
+
+        return action_vec.astype(np.float32)
 
     ###############################################################
     # Deterministic for GPU tensor input
