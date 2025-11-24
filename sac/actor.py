@@ -116,21 +116,22 @@ class Actor(nn.Module):
         return action, logp, mu, std
 
 
-    ###############################################################
-    # Deterministic inference for evaluation
-    ###############################################################
     @torch.no_grad()
-    def act(self, obs_np: np.ndarray):
+    def act(self, obs):
         """
-        obs_np: numpy array (obs_dim,)
-        return: numpy array (3,)
+        returns (3,) action
         """
-        obs = torch.as_tensor(obs_np, dtype=torch.float32).unsqueeze(0)
-        action, _, _, _ = self.forward(obs)
-        a = action.squeeze().cpu().numpy()
+        if obs.ndim == 1:
+            obs = obs[None, :]
 
-        # smoothing 제거 (넘어오던 문제)
-        return a
+        obs_t = torch.as_tensor(obs, dtype=torch.float32, device=self.device)
+
+        action = self.actor.act_tensor(obs_t)
+
+        # ---- FIX: force to (3,) ----
+        action = action.reshape(-1)[:3]
+
+        return action.cpu().numpy().astype(np.float32)
 
 
     ###############################################################
