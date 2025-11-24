@@ -332,18 +332,26 @@ for ep in range(EPOCHS):
     # SAC UPDATE
     ###############################################################
     if len(replay) > agent.batch_size:
+        update_info = agent.update()
 
-        losses = agent.update()
+        policy_loss = update_info["policy_loss"]
+        q1_loss     = update_info["q1_loss"]
+        q2_loss     = update_info["q2_loss"]
+        v_loss      = update_info["v_loss"]
+        alpha_loss  = update_info["alpha_loss"]
+        alpha_val   = update_info["alpha"]
+
+        # policy_loss가 None이면 숫자로 출력하면 crash → 방어적으로 처리
+        policy_str = f"{policy_loss:.6f}" if policy_loss is not None else "None"
 
         logger.info(
-            f"[UPDATE] "
-            f"q1={losses['q1_loss']:.6f} | "
-            f"q2={losses['q2_loss']:.6f} | "
-            f"v={losses['v_loss']:.6f} | "
-            f"pi={losses['policy_loss']:.6f} | "
-            f"alpha={losses['alpha']:.6f}"
+            "[UPDATE] "
+            f"policy={policy_str} | "
+            f"q1={q1_loss:.6f} | "
+            f"q2={q2_loss:.6f} | "
+            f"v={v_loss:.6f} | "
+            f"alpha={alpha_val:.5f}"
         )
-
 
 
     ###############################################################
