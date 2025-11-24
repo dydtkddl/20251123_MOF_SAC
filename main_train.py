@@ -1,6 +1,12 @@
 ###############################################################
-# main_train.py — Structure-Level MACS-SAC FINAL VERSION
+# main_train.py — Structure-Level MACS-SAC (Option 1 FINAL)
 # Author : ChatGPT for Yongsang
+#
+# 핵심:
+#   - ReplayBuffer에는 obs_atom만 저장
+#   - actor는 flatten된 obs_global만 사용
+#   - update()에서 flatten 처리
+#   - env.reset(), env.step() = (obs_atom, obs_global)
 ###############################################################
 
 import os
@@ -19,9 +25,9 @@ from sac.agent import SACAgent
 from utils.replay_buffer import ReplayBuffer
 
 
-###############################################################
+################################################################
 # LOGGING SETUP
-###############################################################
+################################################################
 log_handler = RotatingFileHandler(
     "train.log", maxBytes=40_000_000, backupCount=10
 )
@@ -32,32 +38,30 @@ logger.setLevel(logging.INFO)
 logger.addHandler(log_handler)
 
 
-
-###############################################################
-# CHECKPOINT SAVE
-###############################################################
+################################################################
+# SAVE CHECKPOINT
+################################################################
 def save_checkpoint(ep, agent, tag="auto"):
     os.makedirs("checkpoints", exist_ok=True)
 
     ckpt = {
         "epoch": ep,
         "actor": agent.actor.state_dict(),
-        "q1": agent.q1.state_dict(),
-        "q2": agent.q2.state_dict(),
+        "Q1": agent.critic.Q1.state_dict(),
+        "Q2": agent.critic.Q2.state_dict(),
         "v": agent.v.state_dict(),
         "v_target": agent.v_target.state_dict(),
         "log_alpha": float(agent.log_alpha.detach().cpu())
     }
 
-    path = f"checkpoints/ckpt_ep{ep:04d}_{tag}.pt"
+    path = f"checkpoints/ckpt_{tag}_ep{ep:04d}.pt"
     torch.save(ckpt, path)
     logger.info(f"[CKPT] saved: {path}")
 
 
-
-###############################################################
+################################################################
 # CIF SAMPLER
-###############################################################
+################################################################
 POOL_DIR = "mofs/train_pool_valid"
 
 def sample_cif():
@@ -67,14 +71,13 @@ def sample_cif():
         if f.endswith(".cif")
     ]
     if len(files) == 0:
-        raise RuntimeError("No CIF found in pool directory.")
+        raise RuntimeError("No CIF in pool.")
     return np.random.choice(files)
 
 
-
-###############################################################
+################################################################
 # MACE CALCULATOR
-###############################################################
+################################################################
 calc = MACECalculator(
     model_paths=["mofs_v2.model"],
     head="pbe_d3",
@@ -83,23 +86,25 @@ calc = MACECalculator(
 )
 
 
-
-###############################################################
+################################################################
 # TRAIN CONFIG
-###############################################################
+################################################################
 EPOCHS = 1500
 BASE_STEPS = 200
 FINAL_STEPS = 900
 HORIZON_SCH = 500
+
 FMAX_THRESH = 0.05
 
 BUFFER_SIZE = 4_000_000
 BATCH_SIZE = 256
 CKPT_INTERVAL = 10
 
+
 logger.info("====== Structure-Level MACS-SAC Training Start ======")
 
 global_start = time.time()
+
 agent = None
 replay = None
 
@@ -108,24 +113,24 @@ ACT_GLOBAL_DIM = None
 
 
 
-###############################################################
+################################################################
 # TRAIN LOOP
-###############################################################
+################################################################
 for ep in range(EPOCHS):
 
-    logger.info("\n" + "="*100)
+    logger.info("\n" + "="*120)
     logger.info(f"[EP {ep}] START")
 
-    ###########################################################
-    # Curriculum Learning Scheduling
-    ###########################################################
+    ################################################################
+    # Curriculum schedule
+    ################################################################
     r = min(ep / HORIZON_SCH, 1.0)
     max_steps = int(BASE_STEPS + (FINAL_STEPS - BASE_STEPS) * r)
     logger.info(f"[EP {ep}] max_steps = {max_steps}")
 
-    ###########################################################
-    # CIF Load
-    ###########################################################
+    ################################################################
+    # CIF load
+    ################################################################
     cif = sample_cif()
     atoms = read(cif)
     atoms.calc = calc
@@ -138,9 +143,9 @@ for ep in range(EPOCHS):
         a.calc = calc
         return a
 
-    ###########################################################
-    # Create Environment
-    ###########################################################
+    ################################################################
+    # Env
+    ################################################################
     env = MOFEnv(
         atoms_loader=loader,
         max_steps=max_steps,
@@ -149,20 +154,20 @@ for ep in range(EPOCHS):
         disp_scale=0.03
     )
 
-    ###########################################################
+    ################################################################
     # Reset → (obs_atom, obs_global)
-    ###########################################################
+    ################################################################
     obs_atom, obs_global = env.reset()
 
-    N_atom = obs_atom.shape[0]      # number of atoms
-    FEAT   = obs_atom.shape[1]      # per-atom feature dim
-    OBS_DIM = obs_global.shape[0]   # flatten dimension
+    N_atom = obs_atom.shape[0]
+    FEAT = obs_atom.shape[1]
+    OBS_DIM = obs_global.shape[0]
 
-    logger.info(f"[EP {ep}] OBS_ATOM_DIM = {FEAT}, OBS_GLOBAL_DIM = {OBS_DIM}")
+    logger.info(f"[EP {ep}] FEAT={FEAT}, OBS_GLOBAL_DIM={OBS_DIM}")
 
-    ###########################################################
-    # INIT Agent and Replay on first episode
-    ###########################################################
+    ################################################################
+    # INIT (first episode)
+    ################################################################
     if agent is None:
 
         OBS_GLOBAL_DIM = OBS_DIM
@@ -192,16 +197,16 @@ for ep in range(EPOCHS):
         logger.info("[INIT] SACAgent + ReplayBuffer initialized.")
 
     else:
+        # dimension mismatch — skip episode
         if OBS_DIM != OBS_GLOBAL_DIM:
             logger.warning(
-                f"[EP {ep}] OBS_GLOBAL_DIM mismatch: expected={OBS_GLOBAL_DIM}, got={OBS_DIM} => skip"
+                f"[EP {ep}] OBS_GLOBAL_DIM mismatch: expected={OBS_GLOBAL_DIM}, got={OBS_DIM} => SKIP"
             )
             continue
 
-
-    ###########################################################
+    ################################################################
     # EPISODE START
-    ###########################################################
+    ################################################################
     replay.new_episode()
 
     ep_ret = 0.0
@@ -212,33 +217,31 @@ for ep in range(EPOCHS):
 
     for step in tqdm_bar:
 
-        ###########################################################
-        # 1) Structure-level Action
-        ###########################################################
-        action_global = agent.act(obs_global)        # shape (3N_atom,)
+        ################################################################
+        # 1) STRUCTURE-LEVEL ACTION
+        ################################################################
+        action_global = agent.act(obs_global)     # (3N,)
         action_arr = action_global.reshape(N_atom, 3)
 
-        ###########################################################
-        # 2) Environment Step
-        ###########################################################
+        ################################################################
+        # 2) ENV STEP
+        ################################################################
         next_atom, next_global, reward_scalar, done, done_reason, Etot, Fmax = env.step(action_arr)
 
-        next_obs_global = next_global  # already flattened
-
-        ###########################################################
-        # 3) Store Structure-level Transition
-        ###########################################################
+        ################################################################
+        # 3) STORE — OPTION1: obs_atom/no flatten
+        ################################################################
         replay.store(
-            s=obs_global,
+            s=obs_atom,           # ★ per-atom obs 저장
             a=action_global,
             r=reward_scalar,
-            ns=next_obs_global,
+            ns=next_atom,         # ★ next per-atom obs 저장
             d=done
         )
 
-        ###########################################################
-        # 4) Logging & step update
-        ###########################################################
+        ################################################################
+        # 4) LOGGING
+        ################################################################
         tqdm_bar.set_postfix({
             "Fmax": f"{Fmax:.2e}",
             "reward": f"{reward_scalar:.4f}",
@@ -246,30 +249,31 @@ for ep in range(EPOCHS):
         })
 
         ep_ret += reward_scalar
-        obs_global = next_obs_global
+        obs_atom = next_atom
+        obs_global = next_global  # flatten for actor
 
         if done:
             logger.info(f"[EP {ep}] DONE at step {step}, reason={done_reason}")
             break
 
 
-    ###########################################################
+    ################################################################
     # EPISODE END
-    ###########################################################
+    ################################################################
     logger.info(f"[EP {ep}] return = {ep_ret:.6f}")
 
     if done_reason in ["com", "bond"]:
         replay.end_episode(keep=False)
-        logger.info(f"[EP {ep}] BAD EPISODE → removed.")
+        logger.info(f"[EP {ep}] BAD EPISODE → removed")
     else:
         replay.end_episode(keep=True)
 
-    ###########################################################
+
+    ################################################################
     # SAC UPDATE
-    ###########################################################
+    ################################################################
     if len(replay) > agent.batch_size:
         info = agent.update()
-
         logger.info(
             "[UPDATE] "
             f"policy={info['policy_loss']} | "
@@ -279,19 +283,20 @@ for ep in range(EPOCHS):
             f"alpha={info['alpha']:.5f}"
         )
 
-    ###########################################################
-    # Periodic Checkpoint
-    ###########################################################
+
+    ################################################################
+    # PERIODIC CHECKPOINT
+    ################################################################
     if ep % CKPT_INTERVAL == 0 and ep > 0:
         save_checkpoint(ep, agent, tag="interval")
 
 
-###############################################################
-# FINAL CHECKPOINT
-###############################################################
+################################################################
+# FINAL SAVE
+################################################################
 save_checkpoint(EPOCHS, agent, tag="final")
 
 logger.info(
-    f"==== TRAIN COMPLETE (elapsed={(time.time()-global_start)/3600:.3f} hr) ===="
+    f"==== TRAIN COMPLETE (elapsed={(time.time() - global_start)/3600:.3f} hr) ===="
 )
 print("== TRAIN DONE ==")

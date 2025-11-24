@@ -1,17 +1,15 @@
 ###############################################################
 # sac/critic.py — Structure-Level Critic (MACS Global Policy)
 # -------------------------------------------------------------
-# - CriticV: V(s_global)
-# - CriticQ: Q(s_global, a_global)
-# - TwinCriticQ: SAC Double-Q
+#  - CriticV : V(s_global)
+#  - CriticQ : Q(s_global, a_global)
+#  - TwinCriticQ : Double Q (SAC)
 #
-# Input:
-#   obs_global_dim = N_atoms * obs_dim_atom
+# 입력
+#   obs_global_dim = N_atoms * obs_dim_atom  (flatten)
 #   act_global_dim = N_atoms * 3
 #
-# NOTES:
-#   * No per-atom critic
-#   * Pure structure-level critic for stable MACS RL
+# 구조-level only (per-atom critic 없음)
 ###############################################################
 
 import torch
@@ -20,7 +18,7 @@ import numpy as np
 
 
 ###############################################################
-# Swish activation (same as actor)
+# Swish (MACS 안정 activation)
 ###############################################################
 class Swish(nn.Module):
     def forward(self, x):
@@ -28,7 +26,7 @@ class Swish(nn.Module):
 
 
 ###############################################################
-# Utility: MACS MLP (LN + Swish)
+# 공통 MLP (LN + Swish)
 ###############################################################
 def build_mlp(in_dim, hidden_sizes, out_dim, final_act=False):
     layers = []
@@ -51,13 +49,14 @@ def build_mlp(in_dim, hidden_sizes, out_dim, final_act=False):
 
 
 ###############################################################
-# Value Critic: V(s_global)
+# Critic V(s)
 ###############################################################
 class CriticV(nn.Module):
     """
-    Structure-level V(s):
-        Input  : obs_global (flattened)
-        Output : scalar V(s)
+    Structure-level V(s)
+    ---------------------
+    obs_global: (B, obs_global_dim) or (obs_global_dim,)
+    output    : (B,1)
     """
 
     def __init__(self,
@@ -76,27 +75,21 @@ class CriticV(nn.Module):
 
 
     def forward(self, obs_global: torch.Tensor):
-        """
-        obs_global: (B, obs_global_dim) or (obs_global_dim,)
-        """
         if obs_global.dim() == 1:
             obs_global = obs_global.unsqueeze(0)
         return self.net(obs_global)  # (B,1)
 
 
 ###############################################################
-# Q Critic: Q(s_global, a_global)
+# Critic Q(s,a)
 ###############################################################
 class CriticQ(nn.Module):
     """
     Structure-level Q(s,a)
     ----------------------
-    Inputs:
-        obs_global: (B, obs_global_dim)
-        act_global: (B, act_global_dim)
-
-    Output:
-        Q-value scalar
+    obs_global: (B, obs_global_dim)
+    act_global: (B, act_global_dim)
+    output    : (B,1)
     """
 
     def __init__(self,
@@ -119,28 +112,19 @@ class CriticQ(nn.Module):
 
 
     def forward(self, obs_global: torch.Tensor, act_global: torch.Tensor):
-        """
-        obs_global: (B, obs_global_dim)  OR  (obs_global_dim,)
-        act_global: (B, act_global_dim)  OR  (act_global_dim,)
-        """
-
-        # shape-normalization → never crash
         if obs_global.dim() == 1:
             obs_global = obs_global.unsqueeze(0)
         if act_global.dim() == 1:
             act_global = act_global.unsqueeze(0)
 
         x = torch.cat([obs_global, act_global], dim=-1)
-        return self.net(x)  # (B,1)
+        return self.net(x)   # (B,1)
 
 
 ###############################################################
-# Twin Critic (SAC Double-Q)
+# Twin Critic for SAC
 ###############################################################
 class TwinCriticQ(nn.Module):
-    """
-    Independent Q1, Q2 networks
-    """
     def __init__(self,
                  obs_global_dim: int,
                  act_global_dim: int,
@@ -150,9 +134,5 @@ class TwinCriticQ(nn.Module):
         self.Q1 = CriticQ(obs_global_dim, act_global_dim, hidden)
         self.Q2 = CriticQ(obs_global_dim, act_global_dim, hidden)
 
-
-    def forward(self, obs_global: torch.Tensor, act_global: torch.Tensor):
-        """
-        return: Q1(s,a), Q2(s,a)
-        """
-        return self.Q1(obs_global, act_global), self.Q2(obs_global, act_global)
+    def forward(self, obs, act):
+        return self.Q1(obs, act), self.Q2(obs, act)
