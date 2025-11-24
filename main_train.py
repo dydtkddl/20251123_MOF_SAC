@@ -1,7 +1,7 @@
 ##############################
 # train_mof_multi_env.py  
 # Multi-ENV + Curriculum Horizon + Full Logging + XYZ trajectory dump
-# ★ per-structure RL version (critical fix)
+# ★ per-structure RL + dynamic padding (final stable version)
 ##############################
 
 import os
@@ -90,21 +90,24 @@ FINAL_STEPS  = 1000
 HORIZON_SCH  = 500
 
 FMAX_THRESH  = 0.05
-BUFFER_SIZE  = 1_000_000      # per-structure buffer → much smaller OK
+BUFFER_SIZE  = 1_000_000
 BATCH_SIZE   = 64
 
 CHECKPOINT_INTERVAL = 5
+
 
 ############################################################
 # TRAIN LOOP
 ############################################################
 logger.info(f"[MACS-MOF] Training start (EPOCHS={EPOCHS})")
-
 global_start = time.time()
 
-# replay buffer (will reallocate after env.init)
 replay = None
 agent = None
+
+OBS_DIM = None
+ACT_DIM = None
+
 
 for ep in range(EPOCHS):
 
@@ -120,9 +123,10 @@ for ep in range(EPOCHS):
 
     logger.info(f"[EP {ep}] max_steps = {max_steps}")
 
-    ################################################################
+
+    ############################################################
     # Snapshot directory
-    ################################################################
+    ############################################################
     snap_dir = f"snapshots/EP{ep:04d}"
     os.makedirs(snap_dir, exist_ok=True)
 
@@ -131,6 +135,7 @@ for ep in range(EPOCHS):
 
     if os.path.exists(traj_path): os.remove(traj_path)
     if os.path.exists(energy_path): os.remove(energy_path)
+
 
     ############################################################
     # Load CIF + init ENV
@@ -152,14 +157,20 @@ for ep in range(EPOCHS):
 
     N_atom = env.N
     single_obs_dim = obs.shape[1]
-    OBS_DIM = N_atom * single_obs_dim      # per-structure obs
-    ACT_DIM = N_atom * 3                   # per-structure action
+
+    raw_obs_dim = N_atom * single_obs_dim      # flatten size
+    raw_act_dim = N_atom * 3                   # action flatten size
+
 
     ############################################################
-    # allocate replay + agent (only at EP 0)
+    # Allocate agent (EP0 only)
     ############################################################
     if ep == 0:
+        OBS_DIM = raw_obs_dim
+        ACT_DIM = raw_act_dim
+
         logger.info(f"[INIT] OBS_DIM={OBS_DIM:,}, ACT_DIM={ACT_DIM:,}")
+
         replay = ReplayBuffer(obs_dim=OBS_DIM, act_dim=ACT_DIM, max_size=BUFFER_SIZE)
 
         agent = SACAgent(
@@ -175,39 +186,54 @@ for ep in range(EPOCHS):
 
         logger.info("[INIT] Agent + ReplayBuffer allocated.")
 
-    ############################################
+
+    ############################################################
+    # PAD/TRUNC FUNCTION
+    ############################################################
+    def pad_or_trunc(vec, target_len):
+        L = vec.shape[0]
+        if L < target_len:
+            return np.concatenate([vec, np.zeros(target_len - L, dtype=np.float32)])
+        elif L > target_len:
+            return vec[:target_len]
+        return vec
+
+
+    ############################################################
     # EPISODE LOOP
-    ############################################
+    ############################################################
     ep_ret = 0.0
 
     for step in tqdm(range(max_steps), desc=f"[EP {ep}]", ncols=120):
 
-        ############################################################
-        # per-structure action (flattened)
-        ############################################################
-        obs_flat = obs.reshape(-1)
-        act_flat = agent.act(obs_flat)         # shape (ACT_DIM,)
-        act = act_flat.reshape(N_atom, 3)
+        obs_flat_raw = obs.reshape(-1)  # (raw_obs_dim,)
+        obs_flat = pad_or_trunc(obs_flat_raw, OBS_DIM)
 
+        ############################################################
+        # ACTION
+        ############################################################
+        act_flat_raw = agent.act(obs_flat)
+        act_flat = pad_or_trunc(act_flat_raw, ACT_DIM)
+
+        act = act_flat.reshape(env.N, 3)
+
+        ############################################################
+        # ENV STEP
+        ############################################################
         next_obs, rew, done = env.step(act)
 
-        ############################################################
-        # per-structure reward (critical)
-        ############################################################
         global_rew = float(np.mean(rew))
 
         ############################################################
-        # Store one transition per structure
+        # NEXT OBS FLAT
         ############################################################
-        next_obs_flat = next_obs.reshape(-1)
+        next_obs_flat_raw = next_obs.reshape(-1)
+        next_obs_flat = pad_or_trunc(next_obs_flat_raw, OBS_DIM)
 
-        replay.store(
-            obs_flat,
-            act_flat,
-            global_rew,
-            next_obs_flat,
-            done
-        )
+        ############################################################
+        # STORE
+        ############################################################
+        replay.store(obs_flat, act_flat, global_rew, next_obs_flat, done)
 
         if len(replay) > agent.batch_size:
             agent.update()
@@ -216,30 +242,32 @@ for ep in range(EPOCHS):
         ep_ret += global_rew
 
         ############################################################
-        # Save trajectory
+        # Save Trajectory
         ############################################################
         env.atoms.write(traj_path, append=True)
 
-        # Save energy
+        # Save Energy
         E_total = env.atoms.get_potential_energy()
         E_pa = E_total / env.N
         with open(energy_path, "a") as f:
             f.write(f"{step} {E_total:.8f} {E_pa:.8f}\n")
 
-        # Logging step stats
+        # Logging
         f = np.linalg.norm(env.forces, axis=1)
         logger.info(
             f"[EP {ep}][STEP {step}] "
             f"Natom={env.N} | Favg={np.mean(f):.6f} Fmax={np.max(f):.6f} "
-            f"rew={global_rew:.6f} | replay={len(replay):,} | alpha={float(agent.alpha):.6f}"
+            f"rew={global_rew:.6f} | replay={len(replay):,} "
+            f"| alpha={float(agent.alpha):.6f}"
         )
 
         if done:
-            logger.info(f"[EP {ep}] terminated early at step={step}")
+            logger.info(f"[EP {ep}] terminated early at step {step}")
             break
 
+
     ############################################################
-    # EPISODE END
+    # EP END
     ############################################################
     logger.info(f"[EP {ep}] return={ep_ret:.6f}")
     logger.info(f"[EP {ep}] replay_size={len(replay):,}")
