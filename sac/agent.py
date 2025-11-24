@@ -154,3 +154,20 @@ class SACAgent:
         self.total_steps += 1
 
         # ============================
+        # RETURN LOSSES FOR LOGGING
+        # ============================
+        return {
+            "alpha": float(self.alpha),
+            "alpha_loss": float(alpha_loss),
+            "q1_loss": float(q1_loss),
+            "q2_loss": float(q2_loss),
+            "v_loss": float(v_loss),
+            "policy_loss": float(policy_loss) if self.total_steps % 2 == 0 else None,
+        }
+
+
+    # -------------------------------------------------------------
+    def soft_update(self):
+        with torch.no_grad():
+            for t, s in zip(self.v_tgt.parameters(), self.v.parameters()):
+                t.data.copy_(self.tau * s.data + (1 - self.tau) * t.data)
