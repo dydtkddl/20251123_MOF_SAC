@@ -5,7 +5,7 @@ from ase.geometry import find_mic
 
 ###############################################################
 # Enhanced MOFEnv (Action = scale × (-normalized_force))
-# Including extra structure features without external tools
+# Fully compatible with main_train.py (6-return version)
 ###############################################################
 class MOFEnv:
 
@@ -55,7 +55,6 @@ class MOFEnv:
     # Detect true bonds using covalent radii
     ##################################################################
     def _detect_bonds(self):
-        pos = self.atoms.positions
         Z = self.atomic_numbers
         N = self.N
 
@@ -74,7 +73,7 @@ class MOFEnv:
 
 
     ##################################################################
-    # Compute coordination number
+    # Coordination number
     ##################################################################
     def _coordination_numbers(self):
         CN = np.zeros(self.N)
@@ -85,13 +84,12 @@ class MOFEnv:
 
 
     ##################################################################
-    # Local planarity (aromatic-like measure)
+    # Local planarity proxy
     ##################################################################
     def _local_planarity(self):
         pos = self.atoms.positions
         planar = np.zeros(self.N)
 
-        # simple 3-neighbor approximation
         for i in range(self.N):
             neigh = np.where(self.bond_pairs[:,0] == i)[0].tolist() + \
                     np.where(self.bond_pairs[:,1] == i)[0].tolist()
@@ -107,42 +105,37 @@ class MOFEnv:
             if len(neigh_atoms) < 3:
                 continue
 
-            # choose three neighbors
             a, b, c = neigh_atoms[:3]
-
             v1 = pos[a] - pos[i]
             v2 = pos[b] - pos[i]
             v3 = pos[c] - pos[i]
 
-            normal1 = np.cross(v1, v2)
-            normal2 = np.cross(v1, v3)
+            n1 = np.cross(v1, v2)
+            n2 = np.cross(v1, v3)
 
-            if np.linalg.norm(normal1) < 1e-8 or np.linalg.norm(normal2) < 1e-8:
+            if np.linalg.norm(n1) < 1e-8 or np.linalg.norm(n2) < 1e-8:
                 continue
 
-            cosang = np.dot(normal1, normal2) / (np.linalg.norm(normal1) * np.linalg.norm(normal2))
+            cosang = np.dot(n1, n2) / (np.linalg.norm(n1)*np.linalg.norm(n2))
             planar[i] = abs(cosang)
 
         return planar
 
 
     ##################################################################
-    # Local graph radius (sum of distances to bonded neighbors)
+    # Graph radius proxy
     ##################################################################
     def _local_graph_radius(self):
-        pos = self.atoms.positions
         R = np.zeros(self.N)
-
         for (i, j) in self.bond_pairs:
             d = np.linalg.norm(self._rel_vec(i, j))
             R[i] += d
             R[j] += d
-
         return R
 
 
     ##################################################################
-    # Local stiffness proxy: |F| / |disp_last|
+    # Stiffness proxy: |F| / |disp_last|
     ##################################################################
     def _local_stiffness(self):
         if self.disp_last is None:
@@ -155,13 +148,12 @@ class MOFEnv:
 
 
     ##################################################################
-    # Torsion angle feature for each atom (approx)
+    # Torsion angle approx
     ##################################################################
     def _torsion_feature(self):
         pos = self.atoms.positions
         tors = np.zeros(self.N)
 
-        # very simple dihedral for quadruplets (i - nb1 - nb2 - nb3)
         for i in range(self.N):
             neigh = np.where(self.bond_pairs[:,0] == i)[0].tolist() + \
                     np.where(self.bond_pairs[:,1] == i)[0].tolist()
@@ -180,9 +172,9 @@ class MOFEnv:
             a, b, c = neigh_atoms[:3]
             p0, p1, p2, p3 = pos[a], pos[i], pos[b], pos[c]
 
-            b0 = - (p1 - p0)
-            b1 = p2 - p1
-            b2 = p3 - p2
+            b0 = -(p1 - p0)
+            b1 = (p2 - p1)
+            b2 = (p3 - p2)
 
             n1 = np.cross(b0, b1)
             n2 = np.cross(b1, b2)
@@ -191,14 +183,14 @@ class MOFEnv:
                 continue
 
             x = np.dot(n1, n2)
-            y = np.dot(np.cross(n1, n2), b1 / (np.linalg.norm(b1) + 1e-12))
-            tors[i] = np.arctan2(y, x)  # dihedral angle
+            y = np.dot(np.cross(n1, n2), b1 / (np.linalg.norm(b1)+1e-12))
+            tors[i] = np.arctan2(y, x)
 
         return tors
 
 
     ##################################################################
-    # Local stress proxy: |F| × CN
+    # Local stress proxy
     ##################################################################
     def _local_stress(self, CN):
         force_mag = np.linalg.norm(self.forces, axis=1)
@@ -206,59 +198,59 @@ class MOFEnv:
 
 
     ##################################################################
-    # SBU-level grouping (metal cluster ID)
+    # SBU group ID
     ##################################################################
     def _sbu_id(self):
         Z = self.atomic_numbers
-        metals = set([20, 22, 23, 24, 25, 26, 27, 28, 29, 40, 42, 44])
+        metals = set([20,22,23,24,25,26,27,28,29,40,42,44])
         sbu = np.zeros(self.N)
 
-        cluster_id = 1
+        cid = 1
         for i in range(self.N):
             if Z[i] in metals:
-                sbu[i] = cluster_id
-                cluster_id += 1
+                sbu[i] = cid
+                cid += 1
 
         return sbu
 
 
     ##################################################################
-    # Observation vector: all features
+    # Observation vector
     ##################################################################
     def _obs(self):
         F = self.forces
         f_norm = np.linalg.norm(F, axis=1, keepdims=True) + 1e-12
         f_unit = F / f_norm
 
-        CN = self._coordination_numbers().reshape(-1, 1)
-        planar = self._local_planarity().reshape(-1, 1)
-        graphR = self._local_graph_radius().reshape(-1, 1)
-        stiff = self._local_stiffness().reshape(-1, 1)
-        tors = self._torsion_feature().reshape(-1, 1)
-        stress = self._local_stress(CN.flatten()).reshape(-1, 1)
-        sbu = self._sbu_id().reshape(-1, 1)
+        CN = self._coordination_numbers().reshape(-1,1)
+        planar = self._local_planarity().reshape(-1,1)
+        graphR = self._local_graph_radius().reshape(-1,1)
+        stiff = self._local_stiffness().reshape(-1,1)
+        tors = self._torsion_feature().reshape(-1,1)
+        stress = self._local_stress(CN.flatten()).reshape(-1,1)
+        sbu = self._sbu_id().reshape(-1,1)
 
         global_force_mean = np.mean(f_norm)
         global_force_std = np.std(f_norm)
 
         global_f = np.full((self.N, 2), 
-                           [global_force_mean, global_force_std], 
+                           [global_force_mean, global_force_std],
                            dtype=np.float32)
 
-        energy_norm = np.full((self.N, 1), self.energy, np.float32)
+        energy_norm = np.full((self.N,1), self.energy, np.float32)
 
         obs = np.concatenate([
-            f_unit,            # 3
-            f_norm,            # 1
-            CN,                # 1
-            planar,            # 1
-            graphR,            # 1
-            stiff,             # 1
-            tors,              # 1
-            stress,            # 1
-            sbu,               # 1
-            energy_norm,       # 1
-            global_f,          # 2
+            f_unit,        # 3
+            f_norm,        # 1
+            CN,            # 1
+            planar,        # 1
+            graphR,        # 1
+            stiff,         # 1
+            tors,          # 1
+            stress,        # 1
+            sbu,           # 1
+            energy_norm,   # 1
+            global_f       # 2
         ], axis=1)
 
         return obs.astype(np.float32)
@@ -285,12 +277,14 @@ class MOFEnv:
 
 
     ##################################################################
-    # Step
+    # Step  — returns 6 outputs required by main_train.py
     ##################################################################
     def step(self, action_scale):
+
         self.step_count += 1
 
         scale = np.clip(action_scale, 0.0, 1.0)
+
         F = self.forces
         Fnorm = np.linalg.norm(F, axis=1, keepdims=True) + 1e-12
         Funit = F / Fnorm
@@ -300,7 +294,7 @@ class MOFEnv:
 
         self.atoms.positions += disp
 
-        # Re-evaluate
+        # Re evaluate
         new_forces = self.atoms.get_forces().astype(np.float32)
         new_energy = float(self.atoms.get_potential_energy())
 
@@ -308,43 +302,50 @@ class MOFEnv:
         old_norm = np.linalg.norm(F, axis=1)
         new_norm = np.linalg.norm(new_forces, axis=1)
 
-        r_force = float(np.mean(np.log(old_norm + 1e-12) - np.log(new_norm + 1e-12)))
+        r_force = (np.log(old_norm+1e-12) - np.log(new_norm+1e-12))
+        r_force_mean = float(np.mean(r_force))
+
         r_energy = (self.energy - new_energy)
 
-        reward = self.w_force * r_force + self.w_energy * r_energy
+        # reward is scalar → expand to per-atom vector
+        reward_scalar = self.w_force * r_force_mean + self.w_energy * r_energy
+        reward_vec = np.full(self.N, reward_scalar, dtype=np.float32)
 
         # COM drift
         com_new = self.atoms.positions.mean(axis=0)
         delta_com = np.linalg.norm(com_new - self.com_prev)
-        reward -= self.com_lambda * delta_com
+        reward_vec -= self.com_lambda * delta_com
+
         self.com_prev = com_new.copy()
 
         if delta_com > self.com_threshold:
-            return self._obs(), reward, True, "com"
+            return self._obs(), reward_vec, True, "com", new_energy, float(np.max(new_norm))
 
-        # Bond break
+        # Bond break check
         for k, (i, j) in enumerate(self.bond_pairs):
-            r = np.linalg.norm(self._rel_vec(i, j))
+            r = np.linalg.norm(self._rel_vec(i,j))
             r0 = self.bond_d0[k]
-            ratio = r / r0
-
+            ratio = r/r0
             if ratio > self.bond_break_ratio:
-                reward -= self.bond_lambda * (ratio - self.bond_break_ratio)
-                return self._obs(), reward, True, "bond"
+                over = ratio - self.bond_break_ratio
+                reward_vec -= self.bond_lambda * over
+                return self._obs(), reward_vec, True, "bond", new_energy, float(np.max(new_norm))
 
         # Convergence
-        if np.max(new_norm) < self.fmax_threshold:
+        Fmax = float(np.max(new_norm))
+        if Fmax < self.fmax_threshold:
             self.energy = new_energy
             self.forces = new_forces
-            return self._obs(), reward, True, "fmax"
+            return self._obs(), reward_vec, True, "fmax", new_energy, Fmax
 
         # Max steps
         if self.step_count >= self.max_steps:
             self.energy = new_energy
             self.forces = new_forces
-            return self._obs(), reward, True, "max_steps"
+            return self._obs(), reward_vec, True, "max_steps", new_energy, Fmax
 
+        # Normal update
         self.energy = new_energy
         self.forces = new_forces
 
-        return self._obs(), reward, False, None
+        return self._obs(), reward_vec, False, None, new_energy, Fmax
