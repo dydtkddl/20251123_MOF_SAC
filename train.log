@@ -3395,3 +3395,11 @@
 2025-11-24 21:40:39,349 - INFO - [EP 1][STEP 13] N=70 | Fmax=52.458015 | rew_mean=-0.258636 | alpha=0.99970 | buffer=14,986
 2025-11-24 21:40:39,439 - INFO - [EP 1][STEP 14] N=70 | Fmax=63.962196 | rew_mean=-0.252807 | alpha=0.99970 | buffer=15,056
 2025-11-24 21:40:39,529 - INFO - [EP 1][STEP 15] N=70 | Fmax=77.916161 | rew_mean=-0.281921 | alpha=0.99970 | buffer=15,126
+2025-11-24 21:46:07,352 - INFO - [MOF-SCALE-RL] Training start (epochs = 1500)
+2025-11-24 21:46:07,352 - INFO - 
+================================================================================
+2025-11-24 21:46:07,352 - INFO - [EP 0] START
+2025-11-24 21:46:07,352 - INFO - [EP 0] max_steps = 200
+2025-11-24 21:46:07,875 - INFO - [EP 0] CIF loaded: mofs/train_pool_valid/qmof-6bd4e14.cif
+2025-11-24 21:46:07,876 - INFO - [INIT] OBS_DIM=14 | ACT_DIM=1
+2025-11-24 21:46:07,888 - INFO - [INIT] Agent + ReplayBuffer allocated.
