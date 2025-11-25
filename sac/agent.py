@@ -65,21 +65,18 @@ class SACAgent:
     # --------------------------------------------------------
 
     def select_action(self, obs_np, deterministic: bool = False):
-        """
-        obs_np: (N, obs_dim)
-        반환: (N, act_dim)
-        """
         self.actor.eval()
         with torch.no_grad():
-            obs = torch.as_tensor(obs_np, dtype=torch.float32, device=self.device)
+            # --- 강제 캐스팅 ---
+            obs = torch.as_tensor(obs_np, device=self.device)
+            obs = obs.float()   # <<<< 여기가 핵심
+
             actions, _, mean_action = self.actor.sample(obs, deterministic=deterministic)
-            if deterministic:
-                out = mean_action
-            else:
-                out = actions
+            out = mean_action if deterministic else actions
             actions_np = out.cpu().numpy()
         self.actor.train()
         return actions_np
+
 
     # --------------------------------------------------------
     # 파라미터 업데이트 (one gradient step)
