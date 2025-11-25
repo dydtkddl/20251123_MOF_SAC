@@ -1,981 +1,720 @@
-###############################################################
-# MOFEnv — Multi-Agent RL Environment for MOF Structure Relaxation
-# -----------------------------------------------------------------
-# - 각 원자 = 에이전트 (per-atom observation, per-atom action)
-# - _build_f():
-#     * force / Δforce / disp history
-#     * CN, planarity, graph radius, torsion, stress, SBU id
-#     * Global force statistics (mean/std of |F|)
-#     * MOF topology-aware features:
-#         - _atom_roles(): metal / linker / μ2-O / μ3-O / carboxylate-O /
-#                         aromatic C / terminal
-#         - _bond_motif_feats(): Metal–O, Metal–N, carboxylate O–C–O,
-#                               μ2/μ3-O–Metal, aromatic C–C motif
-#         - _pore_side_feats(): fractional coords, center distance,
-#                               boundary proximity, pore-lining flag
-# - _obs(): per-atom obs_i + k-NN neighbor features → obs_atom (N, FEAT)
-# - reset() → (obs_atom, obs_global_flat)
-# - step(actions) → (next_obs_atom, next_obs_global_flat,
-#                    reward_scalar, done, info_dict)
-###############################################################
-
+import os
 import logging
-from typing import Tuple, Optional
+from typing import Tuple, Dict, Any, Optional
 
 import numpy as np
-from ase.data import covalent_radii
+from ase import Atoms
+from ase.io import read
 from ase.neighborlist import neighbor_list
+from ase.data import covalent_radii, atomic_numbers, chemical_symbols
+from ase.geometry import find_mic
 
-logger = logging.getLogger("env.mof_env")
 
+logger = logging.getLogger(__name__)
+
+# -----------------------------
+# 기본 화학/원자 특성 테이블
+# -----------------------------
+
+# 간단한 파울링 전기음성도 (필요 원소만)
+ELECTRONEGATIVITY = {
+    "H": 2.20,
+    "C": 2.55,
+    "N": 3.04,
+    "O": 3.44,
+    "F": 3.98,
+    "Cl": 3.16,
+    "Zn": 1.65,
+    "Cu": 1.90,
+    "Zr": 1.33,
+    "Ti": 1.54,
+    "Al": 1.61,
+}
+
+# MOF에서 자주 등장하는 금속 원소들
+METAL_ELEMENTS = {
+    "Li", "Na", "K", "Mg", "Ca", "Sr", "Ba",
+    "Sc", "Ti", "V", "Cr", "Mn", "Fe", "Co", "Ni",
+    "Cu", "Zn", "Zr", "Hf", "Al", "Ga", "Y"
+}
+
+# neighbor type one-hot 용 공통 원소 리스트 (길이 10)
+COMMON_NEIGHBOR_ELEMENTS = ["H", "C", "N", "O", "F", "Cl", "Zn", "Cu", "Zr", "Ti"]
+NEIGHBOR_ELEMENT_TO_IDX = {sym: i for i, sym in enumerate(COMMON_NEIGHBOR_ELEMENTS)}
+
+
+# ============================================================
+# AtomsLoader: MOF 구조 로더
+# ============================================================
+
+class AtomsLoader:
+    """
+    mofs/train_pool 아래의 .cif 파일들을 모두 모아서
+    매 reset 때마다 하나씩 샘플링해서 Atoms를 반환한다.
+    """
+
+    def __init__(self, root_dir: str, file_ext: str = ".cif"):
+        self.files = []
+        for dirpath, _, filenames in os.walk(root_dir):
+            for fname in filenames:
+                if fname.lower().endswith(file_ext):
+                    self.files.append(os.path.join(dirpath, fname))
+
+        if not self.files:
+            raise RuntimeError(f"No structure files with ext {file_ext} found under {root_dir}")
+
+        self.n_files = len(self.files)
+        logger.info(f"[AtomsLoader] Found {self.n_files} structures under {root_dir}")
+
+    def sample(self) -> Tuple[Atoms, str]:
+        idx = np.random.randint(0, self.n_files)
+        path = self.files[idx]
+        atoms = read(path)
+        return atoms, path
+
+
+# ============================================================
+# MOFEnv: Per-atom Multi-agent 환경
+# ============================================================
 
 class MOFEnv:
     """
-    Multi-Agent MOF Environment (per-atom observation & action).
-
-    - atoms_loader: 함수를 받아서, 매 reset()마다 fresh ASE Atoms를 생성
-    - 각 step에서:
-        actions: shape (N, 3) in [-1, 1]
-        내부적으로 MACS-style scaling으로 displacement 결정 후 구조 업데이트
-        reward: log|F| 감소 + COM drift / bond stretch / fmax / max_steps 조건 반영
-
-    Returns (step)
-    --------------
-    obs_atom : np.ndarray
-        shape = (N, FEAT)
-    obs_global : np.ndarray
-        shape = (N*FEAT,)
-    reward_scalar : float
-    done : bool
-    info : dict
-        - "done_reason": {"com","bond","fmax","max_steps", None}
-        - "Etot": float (현재는 placeholder 0.0)
-        - "Fmax": float (현재 step에서 max |F|)
-        - 필요시 추가 정보(e.g. "step", "dCOM", "bond_ratio", ...) 포함
+    - 각 원자가 하나의 에이전트
+    - observation: (N_atoms, 360)
+      - center features: 12
+      - neighbor features: 12 neighbors × 29 = 348
+      - 총 360 → 기존 OBS_DIM 유지
+    - action: (N_atoms, 3)  ∈ [-1, 1]^3
+      disp_i = alpha * action_i * (min(||F_i||, cmax) / cmax)
     """
 
     def __init__(
         self,
-        atoms_loader,
+        atoms_loader: AtomsLoader,
+        calculator,
         k_neighbors: int = 12,
-        cmax: float = 0.40,
+        neighbor_cutoff: float = 6.0,
+        cmax: float = 0.4,
         max_steps: int = 300,
-        fmax_threshold: float = 0.05,
+        fmax_threshold: float = 0.12,
         bond_break_ratio: float = 2.4,
         k_bond: float = 3.0,
         max_penalty: float = 10.0,
-        com_threshold: float = 0.25,
-        com_lambda: float = 4.0,
-        w_force: float = 1.0,
-        cutoff_factor: float = 0.8,
+        alpha: float = 0.04,
+        w_f: float = 1.0,
+        w_bond: float = 1.0,
+        w_com: float = 0.1,
         debug_bond: bool = False,
-        disp_scale: Optional[float] = None,
     ):
-        """
-        Parameters
-        ----------
-        atoms_loader : callable
-            호출 시 ASE Atoms를 반환하는 함수 (에너지/힘 calculator는 이미 붙어 있어야 함).
+        self.atoms_loader = atoms_loader
+        self.calculator = calculator
 
-        k_neighbors : int
-            per-atom 이웃 수 (MACS-style kNN).
-
-        cmax : float
-            MACS-style displacement 상한 (기본값). disp_scale이 따로 주어지지 않으면
-            base_disp_scale = cmax 로 사용됨.
-
-        max_steps : int
-            에피소드 최대 스텝 수.
-
-        fmax_threshold : float
-            구조 최적화 성공 판정 기준 (max |F| < threshold).
-
-        bond_break_ratio : float
-            초기 bond 길이에 대한 허용 배수. d / d0 > bond_break_ratio 이면
-            bond penalty 부여 + done="bond".
-
-        k_bond : float
-            bond stretch penalty 강도 (선형 스프링 계수).
-
-        max_penalty : float
-            bond penalty soft cap (penalty = min(k_bond * over, max_penalty)).
-
-        com_threshold : float
-            COM drift 기준. 초과 시 done="com".
-
-        com_lambda : float
-            COM penalty 강도.
-
-        w_force : float
-            force 최적화 reward weight (현재는 log|F| 차이를 기본 reward로 사용하므로
-            대부분 1.0, 필요 시 스케일링에 사용 가능).
-
-        cutoff_factor : float
-            neighbor_list cutoff = cutoff_factor * min(cell length).
-
-        debug_bond : bool
-            True이면 bond stretch 관련 디버그 로그를 추가로 남김.
-
-        disp_scale : Optional[float]
-            명시적으로 MACS-style displacement 상한을 따로 지정하고 싶을 때 사용.
-            None이면 base_disp_scale = cmax 로 설정.
-        """
-        self.loader = atoms_loader
-        self.max_steps = max_steps
-
-        # displacement 관련
+        # neighbor / action 설정
+        self.k = k_neighbors
+        self.neighbor_cutoff = neighbor_cutoff
         self.cmax = cmax
-        self.base_disp_scale = disp_scale if disp_scale is not None else cmax
+        self.alpha = alpha
 
-        # termination / penalty 설정
+        # rollout 설정
+        self.max_steps = max_steps
         self.fmax_threshold = fmax_threshold
-        self.com_threshold = com_threshold
-        self.com_lambda = com_lambda
 
+        # bond penalty 설정
         self.bond_break_ratio = bond_break_ratio
         self.k_bond = k_bond
         self.max_penalty = max_penalty
-        self.w_force = w_force
-
-        # neighbor / cutoff
-        self.k = k_neighbors
-        self.cutoff_factor = cutoff_factor
-
-        # debug
         self.debug_bond = debug_bond
 
-        # 내부 state 초기화
-        self.atoms = None
-        self.N = 0
-        self.atomic_numbers = None
-        self.forces = None
-        self.F_prev = None
-        self.disp_last = None
-        self.bond_pairs = None
-        self.bond_d0 = None
-        self.com_prev = None
+        # reward weight
+        self.w_f = w_f
+        self.w_bond = w_bond
+        self.w_com = w_com
+
+        # 상태 변수
+        self.atoms: Optional[Atoms] = None
+        self.structure_id: Optional[str] = None
+        self.n_atoms: int = 0
+        self.step_count: int = 0
+
+        self.forces: Optional[np.ndarray] = None
+        self.energy: float = 0.0
+        self.prev_fmax: Optional[float] = None
+        self.prev_energy: Optional[float] = None
+
+        self.com0: Optional[np.ndarray] = None  # 초기 COM
+
+        # bond reference
+        self.bond_pairs: Optional[np.ndarray] = None  # (M, 2)
+        self.bond_d0: Optional[np.ndarray] = None     # (M,)
+
+        # atom 타입 마스크
+        self.metal_mask: Optional[np.ndarray] = None
+        self.linker_mask: Optional[np.ndarray] = None
+        self.aromatic_mask: Optional[np.ndarray] = None
+
+        # obs dimension (center 12 + neighbor 29 × k)
+        self.center_dim = 12
+        self.per_neighbor_dim = 29
+        self.obs_dim = self.center_dim + self.per_neighbor_dim * self.k
+
+        logger.info(
+            f"[MOFEnv] Initialized: k={self.k}, obs_dim={self.obs_dim}, "
+            f"fmax_threshold={self.fmax_threshold}, max_steps={self.max_steps}"
+        )
+
+    # --------------------------------------------------------
+    # Public API
+    # --------------------------------------------------------
+
+    def reset(self) -> np.ndarray:
+        """
+        새로운 MOF 구조 샘플링 후 에너지/힘 계산, bond reference 설정,
+        atom 타입/방향성 feature를 초기화하고 per-atom obs (N, 360)를 반환.
+        """
+        self.atoms, self.structure_id = self.atoms_loader.sample()
+        self.atoms.calc = self.calculator
+
+        # PBC가 없으면 기본적으로 PBC 켬 (MOF이므로)
+        if self.atoms.get_pbc() is None:
+            self.atoms.set_pbc([True, True, True])
+
+        self.n_atoms = len(self.atoms)
         self.step_count = 0
 
-        # 현재 사용 중인 CIF 경로 (loader가 Atoms.info["cif_path"]를 줄 경우 저장)
-        self.current_cif_path: str = "unknown"
-
-        # 첫 reset 수행
-        self.reset()
-
-    # ------------------------------------------------------------------
-    # Utility: flatten observation
-    # ------------------------------------------------------------------
-    @staticmethod
-    def flatten_obs(obs: np.ndarray) -> np.ndarray:
-        """
-        (N, feat) → (N*feat,) float32
-        """
-        return obs.reshape(-1).astype(np.float32)
-
-    # ------------------------------------------------------------------
-    # PBC minimum-image helpers
-    # ------------------------------------------------------------------
-    def _pbc_vec(self, i: int, j: int) -> np.ndarray:
-        """
-        i → j 로의 PBC 최소 이미지 벡터 (cartesian) 반환.
-        """
-        pos = self.atoms.positions
-        cell = self.atoms.cell.array
-
-        diff = pos[j] - pos[i]
-        frac = np.linalg.solve(cell.T, diff)
-        frac -= np.round(frac)
-        return frac @ cell
-
-    def _pbc_vec_pos(self, pi: np.ndarray, pj: np.ndarray) -> np.ndarray:
-        """
-        두 좌표 pi, pj에 대한 PBC 최소 이미지 벡터.
-        """
-        cell = self.atoms.cell.array
-        diff = pj - pi
-        frac = np.linalg.solve(cell.T, diff)
-        frac -= np.round(frac)
-        return frac @ cell
-
-    # ------------------------------------------------------------------
-    # MACS-style k-Nearest Neighbors (PBC)
-    # ------------------------------------------------------------------
-    def _kNN(self) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """
-        k-NN neighbor list with PBC-aware relative positions.
-
-        Returns
-        -------
-        nbr_idx : (N, k) int
-        relpos  : (N, k, 3) float32
-        dist    : (N, k) float32
-        """
-        cell_len = self.atoms.cell.lengths()
-        cutoff = self.cutoff_factor * np.min(cell_len)
-
-        i_list, j_list, S_list = neighbor_list("ijS", self.atoms, cutoff)
-        N = self.N
-        k = self.k
-        candidates = [[] for _ in range(N)]
-        cell = self.atoms.cell.array
-
-        for ii, jj, S in zip(i_list, j_list, S_list):
-            # neighbor_list가 주는 S는 셀 변환 계수
-            v = (S @ cell)
-            d = np.linalg.norm(v)
-
-            candidates[ii].append((d, jj, v))
-            candidates[jj].append((d, ii, -v))
-
-        nbr_idx = np.zeros((N, k), dtype=int)
-        relpos = np.zeros((N, k, 3), dtype=np.float32)
-        dist = np.zeros((N, k), dtype=np.float32)
-
-        for i in range(N):
-            cand = candidates[i]
-            if len(cand) < k:
-                need = k - len(cand)
-                cand += [(9e9, i, np.zeros(3))] * need
-            cand.sort(key=lambda x: x[0])
-            topk = cand[:k]
-            for t, (d, j, v) in enumerate(topk):
-                nbr_idx[i, t] = j
-                relpos[i, t] = v
-                dist[i, t] = d
-
-        return nbr_idx, relpos, dist
-
-    # ------------------------------------------------------------------
-    # Bond detection (PBC-aware)
-    # ------------------------------------------------------------------
-    def _detect_bonds(self) -> Tuple[np.ndarray, np.ndarray]:
-        """
-        Covalent radius 기반 bond detection.
-
-        Returns
-        -------
-        bonds : (Nb, 2) int
-        d0    : (Nb,) float
-            초기 bond 길이.
-        """
-        Z = self.atomic_numbers
-        N = self.N
-
-        bonds = []
-        d0 = []
-
-        for i in range(N):
-            Zi = Z[i]
-            for j in range(i + 1, N):
-                rc = covalent_radii[Zi] + covalent_radii[Z[j]] + 0.25
-                v = self._pbc_vec(i, j)
-                d = np.linalg.norm(v)
-                if d <= rc:
-                    bonds.append((i, j))
-                    d0.append(d)
-
-        if len(bonds) == 0:
-            return np.zeros((0, 2), dtype=int), np.zeros((0,), dtype=float)
-
-        return np.array(bonds, dtype=int), np.array(d0, dtype=float)
-
-    # ------------------------------------------------------------------
-    # Coordination number
-    # ------------------------------------------------------------------
-    def _coordination_numbers(self) -> np.ndarray:
-        CN = np.zeros(self.N, dtype=float)
-        for i, j in self.bond_pairs:
-            CN[i] += 1
-            CN[j] += 1
-        return CN
-
-    # ------------------------------------------------------------------
-    # Local planarity
-    # ------------------------------------------------------------------
-    def _local_planarity(self) -> np.ndarray:
-        pos = self.atoms.positions
-        planar = np.zeros(self.N, dtype=float)
-
-        for i in range(self.N):
-            idxs = np.where(self.bond_pairs[:, 0] == i)[0].tolist() + \
-                   np.where(self.bond_pairs[:, 1] == i)[0].tolist()
-
-            neigh = set()
-            for idx in idxs:
-                a, b = self.bond_pairs[idx]
-                neigh.add(a)
-                neigh.add(b)
-
-            neigh.discard(i)
-            neigh = list(neigh)
-            if len(neigh) < 3:
-                continue
-
-            a, b, c = neigh[:3]
-            v1 = self._pbc_vec(i, a)
-            v2 = self._pbc_vec(i, b)
-            v3 = self._pbc_vec(i, c)
-
-            n1 = np.cross(v1, v2)
-            n2 = np.cross(v1, v3)
-
-            if np.linalg.norm(n1) < 1e-9 or np.linalg.norm(n2) < 1e-9:
-                continue
-
-            cosang = np.dot(n1, n2) / (np.linalg.norm(n1) * np.linalg.norm(n2))
-            planar[i] = abs(cosang)
-
-        return planar
-
-    # ------------------------------------------------------------------
-    # Local graph radius
-    # ------------------------------------------------------------------
-    def _local_graph_radius(self) -> np.ndarray:
-        R = np.zeros(self.N, dtype=float)
-        for i, j in self.bond_pairs:
-            v = self._pbc_vec(i, j)
-            d = np.linalg.norm(v)
-            R[i] += d
-            R[j] += d
-        return R
-
-    # ------------------------------------------------------------------
-    # Local stiffness
-    # ------------------------------------------------------------------
-    def _local_stiffness(self) -> np.ndarray:
-        if self.disp_last is None:
-            return np.zeros(self.N, dtype=float)
-        disp_mag = np.linalg.norm(self.disp_last, axis=1) + 1e-12
+        # 초기 에너지/힘 계산
+        self.energy = float(self.atoms.get_potential_energy())
+        self.forces = np.array(self.atoms.get_forces(), dtype=np.float64)
         fmag = np.linalg.norm(self.forces, axis=1)
-        return fmag / disp_mag
+        self.prev_fmax = float(fmag.max())
+        self.prev_energy = self.energy
 
-    # ------------------------------------------------------------------
-    # Torsion
-    # ------------------------------------------------------------------
-    def _torsion(self) -> np.ndarray:
-        tors = np.zeros(self.N, dtype=float)
-        pos = self.atoms.positions
+        # 초기 COM
+        self.com0 = self.atoms.get_center_of_mass()
 
-        for i in range(self.N):
-            idxs = np.where(self.bond_pairs[:, 0] == i)[0].tolist() + \
-                   np.where(self.bond_pairs[:, 1] == i)[0].tolist()
+        # bond reference 세팅
+        self._build_bond_reference()
 
-            neigh = set()
-            for idx in idxs:
-                a, b = self.bond_pairs[idx]
-                neigh.add(a)
-                neigh.add(b)
-            neigh.discard(i)
-            neigh = list(neigh)
-            if len(neigh) < 3:
-                continue
+        # atom 타입 (metal / linker / aromatic 등)
+        self._build_atom_type_masks()
 
-            a, b, c = neigh[:3]
+        obs = self._build_observation()
 
-            p0 = pos[a]
-            p1 = pos[i]
-            p2 = pos[b]
-            p3 = pos[c]
-
-            b0 = -self._pbc_vec_pos(p0, p1)
-            b1 = self._pbc_vec_pos(p1, p2)
-            b2 = self._pbc_vec_pos(p2, p3)
-
-            n1 = np.cross(b0, b1)
-            n2 = np.cross(b1, b2)
-
-            if np.linalg.norm(n1) < 1e-9 or np.linalg.norm(n2) < 1e-9:
-                continue
-
-            x = np.dot(n1, n2)
-            y = np.dot(np.cross(n1, n2), b1 / (np.linalg.norm(b1) + 1e-12))
-            tors[i] = np.arctan2(y, x)
-
-        return tors
-
-    # ------------------------------------------------------------------
-    # Local stress (simple proxy)
-    # ------------------------------------------------------------------
-    def _local_stress(self, CN: np.ndarray) -> np.ndarray:
-        fmag = np.linalg.norm(self.forces, axis=1)
-        return fmag * CN
-
-    # ------------------------------------------------------------------
-    # SBU identifier (very coarse metal id)
-    # ------------------------------------------------------------------
-    def _sbu_id(self) -> np.ndarray:
-        Z = self.atomic_numbers
-        metals = {20, 22, 23, 24, 25, 26, 27, 28, 29, 40, 42, 44}
-        arr = np.zeros(self.N, dtype=float)
-        cid = 1
-        for i in range(self.N):
-            if Z[i] in metals:
-                arr[i] = cid
-                cid += 1
-        return arr
-
-    # ------------------------------------------------------------------
-    # TOPOLOGY HELPERS: roles, motifs, pore features
-    # ------------------------------------------------------------------
-    def _build_neighbor_dict(self):
-        """
-        bond_pairs 기반 neighbor list (adjacency) 생성.
-        """
-        neigh = [[] for _ in range(self.N)]
-        for i, j in self.bond_pairs:
-            neigh[i].append(j)
-            neigh[j].append(i)
-        return neigh
-
-    def _atom_roles(
-        self,
-        CN: Optional[np.ndarray] = None,
-        planar: Optional[np.ndarray] = None,
-    ) -> np.ndarray:
-        """
-        Atom-level role flags:
-            [is_metal,
-             is_linker,
-             is_mu2_O,
-             is_mu3_O,
-             is_carboxylate_O,
-             is_aromatic_C,
-             is_terminal]
-        shape = (N, 7)
-        """
-        Z = self.atomic_numbers
-        if CN is None:
-            CN = self._coordination_numbers()
-        if planar is None:
-            planar = self._local_planarity()
-
-        neigh = self._build_neighbor_dict()
-        roles = np.zeros((self.N, 7), dtype=np.float32)
-
-        metals = {20, 22, 23, 24, 25, 26, 27, 28, 29, 40, 42, 44}
-
-        for i in range(self.N):
-            z = Z[i]
-            nbs = neigh[i]
-            cn_i = CN[i]
-
-            is_metal = z in metals
-            is_O = (z == 8)
-            is_N = (z == 7)
-            is_C = (z == 6)
-
-            # metal flag
-            if is_metal:
-                roles[i, 0] = 1.0
-
-            # terminal: non-metal & CN == 1
-            if (not is_metal) and cn_i == 1:
-                roles[i, 6] = 1.0
-
-            # 기본 linker: metal이 아닌 원자 (rough)
-            if not is_metal and cn_i >= 2:
-                roles[i, 1] = 1.0
-
-            # μ2-O / μ3-O : O가 metal과 2개 또는 3개 이상 결합
-            if is_O:
-                metal_neighbors = 0
-                for j in nbs:
-                    if Z[j] in metals:
-                        metal_neighbors += 1
-                if metal_neighbors == 2:
-                    roles[i, 2] = 1.0
-                elif metal_neighbors >= 3:
-                    roles[i, 3] = 1.0
-
-                # carboxylate O: C와 결합된 O이고, 해당 C가 O를 2개 이상 거느림
-                for j in nbs:
-                    if Z[j] == 6:  # carbon neighbor
-                        O_cnt = sum(1 for k in neigh[j] if Z[k] == 8)
-                        if O_cnt >= 2:
-                            roles[i, 4] = 1.0
-                            break
-
-            # aromatic C (approximation):
-            #  - C atom
-            #  - C neighbors >= 2
-            #  - local_planarity high
-            if is_C:
-                c_neighbors = sum(1 for j in nbs if Z[j] == 6)
-                if c_neighbors >= 2 and planar[i] > 0.9:
-                    roles[i, 5] = 1.0
-
-        return roles
-
-    def _bond_motif_feats(self) -> np.ndarray:
-        """
-        Bond motif participation flags per atom:
-            [has_Metal_O,
-             has_Metal_N,
-             has_carboxylate_OCO,
-             has_mu_O_Metal,
-             has_aromatic_CC]
-        shape = (N, 5)
-        """
-        Z = self.atomic_numbers
-        metals = {20, 22, 23, 24, 25, 26, 27, 28, 29, 40, 42, 44}
-        feat = np.zeros((self.N, 5), dtype=np.float32)
-
-        neigh = self._build_neighbor_dict()
-
-        # Pre-detect aromatic C (간단히 다시 한 번 정의)
-        planar = self._local_planarity()
-        is_aromatic_C = np.zeros(self.N, dtype=bool)
-        for i in range(self.N):
-            if Z[i] != 6:
-                continue
-            c_neighbors = sum(1 for j in neigh[i] if Z[j] == 6)
-            if c_neighbors >= 2 and planar[i] > 0.9:
-                is_aromatic_C[i] = True
-
-        for i, j in self.bond_pairs:
-            zi, zj = Z[i], Z[j]
-
-            # Metal–O
-            if (zi in metals and zj == 8) or (zj in metals and zi == 8):
-                feat[i, 0] = 1.0
-                feat[j, 0] = 1.0
-
-            # Metal–N
-            if (zi in metals and zj == 7) or (zj in metals and zi == 7):
-                feat[i, 1] = 1.0
-                feat[j, 1] = 1.0
-
-            # μ2/μ3-O–Metal
-            if zi == 8 and zj in metals:
-                feat[i, 3] = 1.0
-                feat[j, 3] = 1.0
-            elif zj == 8 and zi in metals:
-                feat[i, 3] = 1.0
-                feat[j, 3] = 1.0
-
-        # Carboxylate O–C–O motif: C with >=2 O neighbors + 그 O들
-        for i in range(self.N):
-            if Z[i] != 6:
-                continue
-            O_neighbors = [j for j in neigh[i] if Z[j] == 8]
-            if len(O_neighbors) >= 2:
-                # mark the carbon & its O neighbors
-                feat[i, 2] = 1.0
-                for o in O_neighbors:
-                    feat[o, 2] = 1.0
-
-        # Aromatic C–C motif: aromatic C와 그 C neighbors
-        for i in range(self.N):
-            if not is_aromatic_C[i]:
-                continue
-            feat[i, 4] = 1.0
-            for j in neigh[i]:
-                if Z[j] == 6:
-                    feat[j, 4] = 1.0
-
-        return feat
-
-    def _pore_side_feats(self) -> np.ndarray:
-        """
-        Pore-side / fractional coordinate features:
-            [frac_x, frac_y, frac_z,
-             dist_center_frac,
-             boundary_proximity,
-             is_pore_lining_flag]
-        shape = (N, 6)
-        """
-        cell = self.atoms.cell.array
-        pos = self.atoms.positions
-
-        # fractional coordinates in [0,1)
-        frac = np.linalg.solve(cell.T, pos.T).T  # (N,3)
-        frac = frac - np.floor(frac)
-
-        center = np.array([0.5, 0.5, 0.5])
-        vec_center = frac - center
-        dist_center = np.linalg.norm(vec_center, axis=1)
-
-        # distance to nearest periodic boundary (0 or 1)
-        boundary_prox = np.min(
-            np.stack([frac, 1.0 - frac], axis=-1), axis=-1
+        logger.info(
+            f"[MOFEnv.reset] structure={self.structure_id}, "
+            f"N_atoms={self.n_atoms}, Fmax0={self.prev_fmax:.3e}, "
+            f"E0={self.energy:.6f}"
         )
-        min_boundary = np.min(boundary_prox, axis=1)
 
-        # 대략적인 pore-lining flag:
-        #  - center에서 어느 정도 떨어져 있고
-        #  - boundary에 너무 붙어있지는 않은 값
-        is_pore_lining = (
-            (dist_center > 0.3) & (dist_center < 0.9) &
-            (min_boundary > 0.1)
-        ).astype(np.float32)
+        return obs
 
-        feats = np.zeros((self.N, 6), dtype=np.float32)
-        feats[:, 0:3] = frac.astype(np.float32)
-        feats[:, 3] = dist_center.astype(np.float32)
-        feats[:, 4] = min_boundary.astype(np.float32)
-        feats[:, 5] = is_pore_lining
-
-        return feats
-
-    # ------------------------------------------------------------------
-    # Build per-atom feature f_i (core)
-    # ------------------------------------------------------------------
-    def _build_f(self) -> np.ndarray:
+    def step(self, actions: np.ndarray) -> Tuple[np.ndarray, float, bool, Dict[str, Any]]:
         """
-        Per-atom feature f_i 생성.
-
-        구성:
-            - force 방향 (unit vector)
-            - log|F_i|
-            - F_i (vector)
-            - ΔF_i (현재 - 이전 force)
-            - 이전 step displacement (disp_last)
-            - CN, planar, graphR, stiffness, torsion, stress
-            - SBU id (metal cluster coarse id)
-            - Global force stats: mean|F|, std|F|
-            - Atom roles (MOF topology)
-            - Bond motifs (Metal–O, Metal–N, OCO, μ-O–Metal, aromatic C–C)
-            - Pore-side features (fractional coordinates, center/boundary 거리, pore-lining flag)
+        actions: (N_atoms, 3) in [-1, 1]
         """
-        F = self.forces.astype(np.float32)  # (N,3)
-        f_norm = np.linalg.norm(F, axis=1) + 1e-12
-        f_unit = F / f_norm[:, None]
+        if self.atoms is None:
+            raise RuntimeError("Call reset() before step().")
 
-        # ΔF history
-        if self.F_prev is None:
-            dF = np.zeros_like(F, dtype=np.float32)
+        if actions.ndim == 1:
+            actions = actions.reshape(-1, 3)
+
+        if actions.shape[0] != self.n_atoms or actions.shape[1] != 3:
+            raise ValueError(
+                f"Actions must be (N_atoms, 3), got {actions.shape}, N_atoms={self.n_atoms}"
+            )
+
+        # 기존 힘 기준으로 변위 계산
+        fmag = np.linalg.norm(self.forces, axis=1, keepdims=True)  # (N,1)
+        scale = np.minimum(fmag, self.cmax) / (self.cmax + 1e-8)   # (N,1)
+        disp = self.alpha * actions * scale                         # (N,3)
+
+        disp_mag = np.linalg.norm(disp, axis=1)
+        disp_mean = float(disp_mag.mean())
+        disp_max = float(disp_mag.max())
+
+        # 좌표 업데이트 + PBC wrap
+        pos = self.atoms.get_positions()
+        new_pos = pos + disp
+        self.atoms.set_positions(new_pos)
+        self.atoms.wrap(eps=1e-12)
+
+        # 새 에너지/힘 계산
+        self.energy = float(self.atoms.get_potential_energy())
+        self.forces = np.array(self.atoms.get_forces(), dtype=np.float64)
+
+        # reward & done 계산
+        reward, done, extra = self._compute_reward_and_done(disp_mean, disp_max)
+
+        # 다음 관측
+        obs_next = self._build_observation()
+
+        info = {
+            "structure_id": self.structure_id,
+            "n_atoms": self.n_atoms,
+            "Fmax": extra["Fmax"],
+            "Fmean": extra["Fmean"],
+            "energy": self.energy,
+            "energy_per_atom": self.energy / self.n_atoms,
+            "bond_penalty": extra["bond_penalty"],
+            "n_bonds_stretched": extra["n_bonds_stretched"],
+            "com_shift": extra["com_shift"],
+            "disp_mean": disp_mean,
+            "disp_max": disp_max,
+            "step": self.step_count,
+        }
+
+        return obs_next, reward, done, info
+
+    # --------------------------------------------------------
+    # 내부 유틸
+    # --------------------------------------------------------
+
+    def _build_bond_reference(self):
+        """
+        초기 구조에서 bond reference (pair & d0) 설정.
+        bond 판단 기준: d < 1.2 * (r_cov_i + r_cov_j)
+        """
+        atoms = self.atoms
+        Z = atoms.get_atomic_numbers()
+        rcov = np.array([covalent_radii[z] for z in Z], dtype=np.float64)
+
+        i_idx, j_idx, S = neighbor_list("ijS", atoms, self.neighbor_cutoff)
+        cell = atoms.get_cell()
+        pbc = atoms.get_pbc()
+
+        pos = atoms.get_positions()
+
+        dR = pos[j_idx] + np.dot(S, cell) - pos[i_idx]
+        dR_mic, dist = find_mic(dR, cell, pbc)
+
+        r_sum = rcov[i_idx] + rcov[j_idx]
+        ref_ratio = 1.2  # reference bond 길이 기준
+        mask = dist < ref_ratio * r_sum
+
+        i_b = i_idx[mask]
+        j_b = j_idx[mask]
+        d0 = dist[mask]
+
+        # i < j 로 정규화해서 중복 제거
+        keep = i_b < j_b
+        i_b = i_b[keep]
+        j_b = j_b[keep]
+        d0 = d0[keep]
+
+        self.bond_pairs = np.stack([i_b, j_b], axis=1)
+        self.bond_d0 = d0
+
+        logger.info(
+            f"[MOFEnv] Bond reference built: n_bonds={len(self.bond_pairs)} "
+            f"(structure={self.structure_id})"
+        )
+
+    def _build_atom_type_masks(self):
+        """
+        metal / linker / aromatic 간단 분류.
+        aromatic: (C or N)이고, C/N 이웃이 2개 이상인 경우로 heuristic.
+        """
+        symbols = self.atoms.get_chemical_symbols()
+        N = len(symbols)
+
+        metal_mask = np.array([s in METAL_ELEMENTS for s in symbols], dtype=bool)
+        linker_mask = ~metal_mask
+
+        # adjacency from bond_pairs
+        adj = [[] for _ in range(N)]
+        if self.bond_pairs is not None:
+            for a, b in self.bond_pairs:
+                adj[a].append(b)
+                adj[b].append(a)
+
+        aromatic_mask = np.zeros(N, dtype=bool)
+        for i, s in enumerate(symbols):
+            if s not in ("C", "N"):
+                continue
+            neigh = adj[i]
+            if len(neigh) < 2:
+                continue
+            n_cn = sum(symbols[j] in ("C", "N") for j in neigh)
+            if n_cn >= 2:
+                aromatic_mask[i] = True
+
+        self.metal_mask = metal_mask
+        self.linker_mask = linker_mask
+        self.aromatic_mask = aromatic_mask
+
+        n_metal = int(metal_mask.sum())
+        n_arom = int(aromatic_mask.sum())
+        logger.info(
+            f"[MOFEnv] Atom type masks: metal={n_metal}, aromatic={n_arom}, "
+            f"linker={N - n_metal}"
+        )
+
+    def _compute_reward_and_done(self, disp_mean: float, disp_max: float):
+        """
+        - force-based reward: log(F_old) - log(F_new)
+        - bond penalty: bond_break_ratio 기반 soft penalty
+        - COM penalty: 초기 COM에서의 drift
+        """
+        assert self.forces is not None
+        fmag = np.linalg.norm(self.forces, axis=1)
+        Fmax_new = float(fmag.max())
+        Fmean_new = float(fmag.mean())
+        eps = 1e-8
+
+        if self.prev_fmax is None:
+            reward_force = 0.0
         else:
-            dF = (F - self.F_prev).astype(np.float32)
+            reward_force = np.log(self.prev_fmax + eps) - np.log(Fmax_new + eps)
 
-        # displacement history
-        if self.disp_last is None:
-            disp_prev = np.zeros_like(F, dtype=np.float32)
+        # bond penalty
+        bond_penalty, n_stretched = self._bond_penalty()
+
+        # COM penalty
+        com_curr = self.atoms.get_center_of_mass()
+        com_shift_vec = com_curr - self.com0
+        com_shift = float(np.linalg.norm(com_shift_vec))
+        com_penalty = com_shift
+
+        reward = (
+            self.w_f * reward_force
+            - self.w_bond * bond_penalty
+            - self.w_com * com_penalty
+        )
+
+        # step 증가
+        self.step_count += 1
+
+        done = bool(
+            Fmax_new < self.fmax_threshold or self.step_count >= self.max_steps
+        )
+
+        # state 업데이트
+        self.prev_fmax = Fmax_new
+        self.prev_energy = self.energy
+
+        extra = {
+            "Fmax": Fmax_new,
+            "Fmean": Fmean_new,
+            "bond_penalty": bond_penalty,
+            "n_bonds_stretched": n_stretched,
+            "com_shift": com_shift,
+        }
+
+        if self.debug_bond:
+            logger.debug(
+                f"[MOFEnv.step] step={self.step_count} "
+                f"reward_force={reward_force:.4f}, bond_penalty={bond_penalty:.4f}, "
+                f"com_penalty={com_penalty:.4f}, reward={reward:.4f}"
+            )
+
+        return float(reward), done, extra
+
+    def _bond_penalty(self) -> Tuple[float, int]:
+        """
+        bond 길이가 bond_break_ratio * d0 를 넘는 경우 soft penalty 부여.
+        """
+        if self.bond_pairs is None or len(self.bond_pairs) == 0:
+            return 0.0, 0
+
+        atoms = self.atoms
+        pos = atoms.get_positions()
+        cell = atoms.get_cell()
+        pbc = atoms.get_pbc()
+
+        i = self.bond_pairs[:, 0]
+        j = self.bond_pairs[:, 1]
+
+        dR = pos[j] - pos[i]
+        dR_mic, dist = find_mic(dR, cell, pbc)
+
+        ratio = dist / (self.bond_d0 + 1e-8)
+        excess = np.clip(ratio - self.bond_break_ratio, 0.0, None)
+
+        # quadratic penalty, soft-capped
+        penalty_per_bond = self.k_bond * excess ** 2
+        penalty_per_bond = np.minimum(penalty_per_bond, self.max_penalty)
+
+        n_stretched = int((excess > 0.0).sum())
+        if len(penalty_per_bond) == 0:
+            bond_penalty = 0.0
         else:
-            disp_prev = self.disp_last.astype(np.float32)
+            bond_penalty = float(penalty_per_bond.mean())
 
-        CN = self._coordination_numbers()
-        planar = self._local_planarity()
-        graphR = self._local_graph_radius()
-        stiff = self._local_stiffness()
-        tors = self._torsion()
-        stress = self._local_stress(CN)
-        sbu = self._sbu_id()
+        return bond_penalty, n_stretched
 
-        # Global stats
-        gF_mean = float(np.mean(f_norm))
-        gF_std = float(np.std(f_norm) + 1e-12)
-        logF = np.log(f_norm)
+    # --------------------------------------------------------
+    # Observation builder (N_atoms, 360)
+    # --------------------------------------------------------
 
-        # MOF topology-specific features
-        roles = self._atom_roles(CN=CN, planar=planar)        # (N,7)
-        motifs = self._bond_motif_feats()                     # (N,5)
-        pore_feats = self._pore_side_feats()                  # (N,6)
-
-        # Broadcast global stats
-        gF_mean_col = np.full((self.N, 1), gF_mean, dtype=np.float32)
-        gF_std_col = np.full((self.N, 1), gF_std, dtype=np.float32)
-
-        # Concatenate all
-        f = np.concatenate(
-            [
-                f_unit,                    # 3
-                logF[:, None],             # 1
-                F,                         # 3
-                dF,                        # 3
-                disp_prev,                 # 3
-                CN[:, None],               # 1
-                planar[:, None],           # 1
-                graphR[:, None],           # 1
-                stiff[:, None],            # 1
-                tors[:, None],             # 1
-                stress[:, None],           # 1
-                sbu[:, None],              # 1
-                gF_mean_col,               # 1
-                gF_std_col,                # 1
-                roles,                     # 7
-                motifs,                    # 5
-                pore_feats,                # 6
-            ],
-            axis=1,
-        ).astype(np.float32)
-
-        # shape = (N, feat_dim)
-        return f
-
-    # ------------------------------------------------------------------
-    # Build observation with k-NN neighbors
-    # ------------------------------------------------------------------
-    def _obs(self) -> np.ndarray:
+    def _build_observation(self) -> np.ndarray:
         """
-        MACS-style per-atom observation with neighbor info.
+        center 12 + neighbor(12) × 29 = 360
+        center features (12):
+          0: Z / 100
+          1: period / 7
+          2: group / 18 (대략)
+          3: covalent radius
+          4: electronegativity (0 if unknown)
+          5: is_metal (0/1)
+          6: is_O (0/1)
+          7: is_N (0/1)
+          8: is_C (0/1)
+          9: is_aromatic (0/1)
+          10: is_metal_cluster_atom (metal_mask)
+          11: is_linker_atom (~metal_mask)
 
-        Returns
-        -------
-        obs : (N, FEAT) float32
-            각 row = [f_i, f_neighbors(flat), relpos_neighbors(flat), dist_neighbors(flat)]
+        per-neighbor features (29):
+          0-2: dx, dy, dz (MIC)
+          3:   dist
+          4:   dist / neighbor_cutoff
+          5:   r_sum (r_cov_i + r_cov_j)
+          6:   dist / r_sum
+          7:   bond_flag (0/1, ref bond 존재 여부)
+          8:   is_metal_metal
+          9:   is_metal_O
+          10:  is_metal_N
+          11:  is_carboxyl_O (O-C/O-M에 해당하는 O 근사)
+          12:  is_aromatic_pair (both aromatic)
+          13-22: neighbor type one-hot (COMMON_NEIGHBOR_ELEMENTS, dim=10)
+          23:  |F_i| / (cmax + eps)
+          24:  |F_j| / (cmax + eps)
+          25:  alignment(F_i, dR_unit)
+          26:  neighbor index / k
+          27:  local bond stretch flag (> bond_break_ratio)
+          28:  zero padding (reserved)
         """
-        f = self._build_f()
-        nbr_idx, relpos, dist = self._kNN()
+        atoms = self.atoms
+        Z = atoms.get_atomic_numbers()
+        symbols = atoms.get_chemical_symbols()
+        rcov = np.array([covalent_radii[z] for z in Z], dtype=np.float64)
 
-        N, k = self.N, self.k
-        Fdim = f.shape[1]
+        fvec = self.forces
+        fmag = np.linalg.norm(fvec, axis=1)  # (N,)
 
-        obs_dim = Fdim + k * Fdim + k * 3 + k
-        obs = np.zeros((N, obs_dim), dtype=np.float32)
+        N = self.n_atoms
+        obs = np.zeros((N, self.obs_dim), dtype=np.float32)
 
+        # neighbor 정보 (k-NN, PBC MIC)
+        nbr_indices, nbr_dR, nbr_dist = self._build_neighbor_info()
+
+        # bond reference를 빠르게 lookup 하기 위한 set
+        bond_set = set()
+        if self.bond_pairs is not None:
+            for a, b in self.bond_pairs:
+                if a < b:
+                    bond_set.add((int(a), int(b)))
+                else:
+                    bond_set.add((int(b), int(a)))
+
+        metal_mask = self.metal_mask
+        aromatic_mask = self.aromatic_mask
+
+        # center & neighbor loop
         for i in range(N):
-            neigh_f = f[nbr_idx[i]].reshape(-1)  # (k*Fdim,)
-            obs[i] = np.concatenate(
-                [
-                    f[i],                        # center features
-                    neigh_f,                     # neighbor features
-                    relpos[i].reshape(-1),       # k*3
-                    dist[i].reshape(-1),         # k
-                ]
+            z = Z[i]
+            sym = symbols[i]
+
+            # ------------- center 12 -------------
+            center_feat = np.zeros(self.center_dim, dtype=np.float32)
+
+            # 원자번호 / 주기 / 족 (대략적인 group)
+            center_feat[0] = z / 100.0
+            period = self._period_from_Z(z)
+            group = self._group_from_Z(z)
+            center_feat[1] = period / 7.0
+            center_feat[2] = group / 18.0
+
+            center_feat[3] = float(rcov[i])
+
+            chi = ELECTRONEGATIVITY.get(sym, 0.0)
+            center_feat[4] = float(chi)
+
+            center_feat[5] = float(metal_mask[i])
+            center_feat[6] = float(sym == "O")
+            center_feat[7] = float(sym == "N")
+            center_feat[8] = float(sym == "C")
+            center_feat[9] = float(aromatic_mask[i])
+            center_feat[10] = float(metal_mask[i])  # metal cluster
+            center_feat[11] = float(not metal_mask[i])
+
+            # ------------- neighbor 29 × k -------------
+            neighbor_feat = np.zeros((self.k, self.per_neighbor_dim), dtype=np.float32)
+
+            Fi = fvec[i]
+            Fi_mag = fmag[i]
+            Fi_norm = Fi_mag / (self.cmax + 1e-6)
+
+            for n in range(self.k):
+                j = int(nbr_indices[i, n])
+                if j < 0:
+                    # padding
+                    continue
+
+                sym_j = symbols[j]
+                dr = nbr_dR[i, n]
+                d = nbr_dist[i, n]
+                r_sum = rcov[i] + rcov[j]
+                r_sum = r_sum if r_sum > 1e-6 else 1e-6
+
+                # feature vector (29)
+                feat = np.zeros(self.per_neighbor_dim, dtype=np.float32)
+
+                # geom
+                feat[0:3] = dr.astype(np.float32)
+                feat[3] = float(d)
+                feat[4] = float(d / (self.neighbor_cutoff + 1e-6))
+                feat[5] = float(r_sum)
+                feat[6] = float(d / r_sum)
+
+                # bond flag
+                key = (i, j) if i < j else (j, i)
+                bond_flag = 1.0 if key in bond_set else 0.0
+                feat[7] = bond_flag
+
+                # motif-like 플래그
+                is_metal_i = metal_mask[i]
+                is_metal_j = metal_mask[j]
+                feat[8] = float(is_metal_i and is_metal_j)  # metal-metal
+                feat[9] = float((is_metal_i or is_metal_j) and ("O" in {sym, sym_j}))
+                feat[10] = float((is_metal_i or is_metal_j) and ("N" in {sym, sym_j}))
+
+                # carboxylate O 근사 (O에 metal 또는 C가 붙은 경우)
+                feat[11] = float(
+                    (sym == "O" or sym_j == "O")
+                    and (("C" in {sym, sym_j}) or (is_metal_i or is_metal_j))
+                )
+
+                # aromatic pair
+                feat[12] = float(aromatic_mask[i] and aromatic_mask[j])
+
+                # neighbor type one-hot (13-22)
+                base_idx = 13
+                idx = NEIGHBOR_ELEMENT_TO_IDX.get(sym_j, None)
+                if idx is not None:
+                    feat[base_idx + idx] = 1.0
+
+                # force / alignment
+                Fj_mag = fmag[j]
+                Fj_norm = Fj_mag / (self.cmax + 1e-6)
+                feat[23] = float(Fi_norm)
+                feat[24] = float(Fj_norm)
+
+                if d > 1e-6 and Fi_mag > 1e-6:
+                    dR_unit = dr / d
+                    align = float(np.dot(Fi, dR_unit) / (Fi_mag + 1e-6))
+                else:
+                    align = 0.0
+                feat[25] = align
+
+                # neighbor index / k
+                feat[26] = float(n) / float(self.k)
+
+                # local bond stretch flag (> bond_break_ratio)
+                if key in bond_set:
+                    # 대략 현재 bond 길이 vs d0 비교
+                    # (d0는 pair index에서 찾아야 하지만 여기선 근사로 ratio만 사용)
+                    ratio = d / r_sum
+                    feat[27] = float(ratio > self.bond_break_ratio)
+                else:
+                    feat[27] = 0.0
+
+                # 28: reserved zero
+                feat[28] = 0.0
+
+                neighbor_feat[n, :] = feat
+
+            # concat
+            obs[i, :] = np.concatenate(
+                [center_feat.astype(np.float32), neighbor_feat.reshape(-1)], axis=0
             )
 
         return obs
 
-    # ------------------------------------------------------------------
-    # Reset
-    # ------------------------------------------------------------------
-    def reset(self):
+    def _build_neighbor_info(self):
         """
-        새 Atoms 불러와서 초기 forces, bonds, features 계산 후
-        (obs_atom, obs_global_flat) 반환.
+        neighbor_list + MIC로 각 원자별 최대 self.k 개 neighbor 정보를 생성.
+        반환:
+          nbr_indices: (N, k)  [-1 padding]
+          nbr_dR:      (N, k, 3)
+          nbr_dist:    (N, k)
         """
-        self.atoms = self.loader()
-        self.N = len(self.atoms)
-        self.atomic_numbers = np.array(
-            [a.number for a in self.atoms], dtype=int
-        )
+        atoms = self.atoms
+        N = len(atoms)
+        pos = atoms.get_positions()
+        cell = atoms.get_cell()
+        pbc = atoms.get_pbc()
 
-        # 현재 사용 중인 CIF 경로 (info에 있으면 기록)
-        self.current_cif_path = self.atoms.info.get("cif_path", "unknown")
+        i_idx, j_idx, S = neighbor_list("ijS", atoms, self.neighbor_cutoff)
+        dR = pos[j_idx] + np.dot(S, cell) - pos[i_idx]
+        dR_mic, dist = find_mic(dR, cell, pbc)
 
-        self.forces = self.atoms.get_forces().astype(np.float32)
-        self.bond_pairs, self.bond_d0 = self._detect_bonds()
+        # 거리 순으로 sort 후 상위 k개만 채우기
+        order = np.argsort(dist)
+        i_idx = i_idx[order]
+        j_idx = j_idx[order]
+        dR_mic = dR_mic[order]
+        dist = dist[order]
 
-        self.F_prev = None
-        self.disp_last = None
-        self.com_prev = self.atoms.positions.mean(axis=0)
-        self.step_count = 0
+        nbr_indices = -np.ones((N, self.k), dtype=np.int64)
+        nbr_dR = np.zeros((N, self.k, 3), dtype=np.float32)
+        nbr_dist = np.zeros((N, self.k), dtype=np.float32)
 
-        obs_atom = self._obs()
-        obs_global = self.flatten_obs(obs_atom)
+        counts = np.zeros(N, dtype=np.int32)
+        for i, j, dr, d in zip(i_idx, j_idx, dR_mic, dist):
+            c = counts[i]
+            if c >= self.k:
+                continue
+            nbr_indices[i, c] = j
+            nbr_dR[i, c, :] = dr.astype(np.float32)
+            nbr_dist[i, c] = float(d)
+            counts[i] += 1
 
-        logger.debug(
-            f"[MOFEnv.reset] N={self.N}, bonds={len(self.bond_pairs)}, "
-            f"obs_atom_dim={obs_atom.shape[1]}, cif_path={self.current_cif_path}"
-        )
-        return obs_atom, obs_global
+        return nbr_indices, nbr_dR, nbr_dist
 
-    # ------------------------------------------------------------------
-    # Step
-    # ------------------------------------------------------------------
-    def step(self, action_u: np.ndarray):
+    # --------------------------------------------------------
+    # 간단한 Z → period / group 헬퍼
+    # (정확 group 필요 없고 대략적인 scaling 용)
+    # --------------------------------------------------------
+
+    @staticmethod
+    def _period_from_Z(Z_val: int) -> int:
+        if Z_val <= 2:
+            return 1
+        elif Z_val <= 10:
+            return 2
+        elif Z_val <= 18:
+            return 3
+        elif Z_val <= 36:
+            return 4
+        elif Z_val <= 54:
+            return 5
+        elif Z_val <= 86:
+            return 6
+        else:
+            return 7
+
+    @staticmethod
+    def _group_from_Z(Z_val: int) -> int:
         """
-        Parameters
-        ----------
-        action_u : (N, 3) ndarray
-            각 원자별 [-1,1]^3 범위의 displacement 방향 (policy output).
-
-        Returns
-        -------
-        obs_atom      : (N, FEAT)
-        obs_global    : (N*FEAT,)
-        reward_scalar : float
-        done          : bool
-        info          : dict
-            - "done_reason": {"com","bond","fmax","max_steps", None}
-            - "Etot": float (placeholder, 현재는 0.0)
-            - "Fmax": float (현재 max |F|)
-            - 추가로 "step", "dCOM", "bond_ratio" 등 상황별 보조 정보 포함
+        매우 대략적인 group mapping. RL feature scaling용이라
+        대충만 맞으면 됨.
         """
-        self.step_count += 1
-
-        F_old = self.forces
-        old_norm = np.linalg.norm(F_old, axis=1) + 1e-12
-
-        # --------------------------------------------------------------
-        # 0) MACS Eq.4 scaling: c_i = min( |F_i|, base_disp_scale )
-        # --------------------------------------------------------------
-        c_i = np.minimum(old_norm, self.base_disp_scale)
-
-        u = np.clip(action_u, -1.0, 1.0)
-        disp = c_i[:, None] * u
-        self.disp_last = disp.astype(np.float32)
-
-        # apply displacement
-        self.atoms.positions += disp
-
-        new_F = self.atoms.get_forces().astype(np.float32)
-        new_norm = np.linalg.norm(new_F, axis=1)
-        Fmax = float(new_norm.max())
-        Etot_stub = 0.0  # 에너지 placeholder (필요시 calculator에서 받아서 교체 가능)
-
-        # --------------------------------------------------------------
-        # 1) Force-based reward (log|F| 감소)
-        # --------------------------------------------------------------
-        R_vec = np.log(old_norm) - np.log(new_norm + 1e-12)
-        R_vec = np.clip(R_vec, -5.0, 5.0)
-        reward_scalar = float(np.mean(R_vec))
-
-        # --------------------------------------------------------------
-        # 2) COM drift penalty + termination
-        # --------------------------------------------------------------
-        com_new = self.atoms.positions.mean(axis=0)
-        dCOM = np.linalg.norm(com_new - self.com_prev)
-        reward_scalar -= self.com_lambda * np.tanh(4.0 * dCOM)
-        self.com_prev = com_new.copy()
-
-        if dCOM > self.com_threshold:
-            self.F_prev = new_F.copy()
-            self.forces = new_F
-            obs_atom = self._obs()
-            obs_global = self.flatten_obs(obs_atom)
-
-            info = {
-                "done_reason": "com",
-                "Etot": Etot_stub,
-                "Fmax": Fmax,
-                "step": self.step_count,
-                "dCOM": float(dCOM),
-            }
-
-            logger.debug(
-                f"[MOFEnv.step] done='com', step={self.step_count}, "
-                f"dCOM={dCOM:.4f}, Fmax={Fmax:.4e}, reward={reward_scalar:.4f}"
-            )
-
-            return obs_atom, obs_global, reward_scalar, True, info
-
-        # --------------------------------------------------------------
-        # 3) Bond stretch penalty + termination
-        #    - ratio = d / d0
-        #    - if ratio > bond_break_ratio:
-        #        over    = ratio - bond_break_ratio
-        #        penalty = min(k_bond * over, max_penalty)
-        #        reward -= penalty
-        #        done = True, reason="bond"
-        # --------------------------------------------------------------
-        for idx, (i, j) in enumerate(self.bond_pairs):
-            v = self._pbc_vec(i, j)
-            d = np.linalg.norm(v)
-            ratio = d / (self.bond_d0[idx] + 1e-12)
-
-            if ratio > self.bond_break_ratio:
-                over = ratio - self.bond_break_ratio
-                penalty = self.k_bond * over
-                if penalty > self.max_penalty:
-                    penalty = self.max_penalty
-                reward_scalar -= penalty
-
-                if self.debug_bond:
-                    logger.debug(
-                        "[MOFEnv.step][bond] step=%d, i=%d, j=%d, "
-                        "d0=%.4f, d=%.4f, ratio=%.3f, over=%.3f, "
-                        "penalty=%.3f",
-                        self.step_count,
-                        i,
-                        j,
-                        self.bond_d0[idx],
-                        d,
-                        ratio,
-                        over,
-                        penalty,
-                    )
-
-                self.F_prev = new_F.copy()
-                self.forces = new_F
-                obs_atom = self._obs()
-                obs_global = self.flatten_obs(obs_atom)
-
-                info = {
-                    "done_reason": "bond",
-                    "Etot": Etot_stub,
-                    "Fmax": Fmax,
-                    "step": self.step_count,
-                    "bond_index": int(idx),
-                    "bond_atoms": (int(i), int(j)),
-                    "bond_ratio": float(ratio),
-                    "bond_d0": float(self.bond_d0[idx]),
-                    "bond_d": float(d),
-                    "bond_penalty": float(penalty),
-                }
-
-                logger.debug(
-                    f"[MOFEnv.step] done='bond', step={self.step_count}, "
-                    f"ratio={ratio:.3f}, Fmax={Fmax:.4e}, "
-                    f"reward={reward_scalar:.4f}"
-                )
-
-                return obs_atom, obs_global, reward_scalar, True, info
-
-        # --------------------------------------------------------------
-        # 4) Fmax termination
-        # --------------------------------------------------------------
-        if Fmax < self.fmax_threshold:
-            self.F_prev = new_F.copy()
-            self.forces = new_F
-            obs_atom = self._obs()
-            obs_global = self.flatten_obs(obs_atom)
-
-            info = {
-                "done_reason": "fmax",
-                "Etot": Etot_stub,
-                "Fmax": Fmax,
-                "step": self.step_count,
-            }
-
-            logger.debug(
-                f"[MOFEnv.step] done='fmax', step={self.step_count}, "
-                f"Fmax={Fmax:.4e}, reward={reward_scalar:.4f}"
-            )
-
-            return obs_atom, obs_global, reward_scalar, True, info
-
-        # --------------------------------------------------------------
-        # 5) max-step termination
-        # --------------------------------------------------------------
-        if self.step_count >= self.max_steps:
-            self.F_prev = new_F.copy()
-            self.forces = new_F
-            obs_atom = self._obs()
-            obs_global = self.flatten_obs(obs_atom)
-
-            info = {
-                "done_reason": "max_steps",
-                "Etot": Etot_stub,
-                "Fmax": Fmax,
-                "step": self.step_count,
-            }
-
-            logger.debug(
-                f"[MOFEnv.step] done='max_steps', step={self.step_count}, "
-                f"Fmax={Fmax:.4e}, reward={reward_scalar:.4f}"
-            )
-
-            return obs_atom, obs_global, reward_scalar, True, info
-
-        # --------------------------------------------------------------
-        # 6) Normal step (no termination)
-        # --------------------------------------------------------------
-        self.F_prev = new_F.copy()
-        self.forces = new_F
-        obs_atom = self._obs()
-        obs_global = self.flatten_obs(obs_atom)
-
-        info = {
-            "done_reason": None,
-            "Etot": Etot_stub,
-            "Fmax": Fmax,
-            "step": self.step_count,
-        }
-
-        logger.debug(
-            f"[MOFEnv.step] step={self.step_count}, "
-            f"Fmax={Fmax:.4e}, reward={reward_scalar:.4f}"
-        )
-
-        return obs_atom, obs_global, reward_scalar, False, info
+        sym = chemical_symbols[Z_val]
+        # 간단 heuristic
+        if sym in {"H", "Li", "Na", "K"}:
+            return 1
+        if sym in {"Be", "Mg", "Ca", "Sr", "Ba"}:
+            return 2
+        if sym in {"B", "Al", "Ga"}:
+            return 13
+        if sym in {"C", "Si"}:
+            return 14
+        if sym in {"N", "P"}:
+            return 15
+        if sym in {"O", "S"}:
+            return 16
+        if sym in {"F", "Cl"}:
+            return 17
+        if sym in {"He", "Ne", "Ar", "Kr", "Xe"}:
+            return 18
+        # 전이금속 등은 대충 10 부근으로
+        return 10
