@@ -109,7 +109,7 @@ def main():
 
     # MACE Calculator
     logger.info(f"Loading MACE model from {args.model_path}")
-    calculator = MACECalculator(model_path=args.model_path, device=device_str)
+    calculator = MACECalculator(model_path=args.model_path, device=device_str, head="pbe_d3")
 
     # Atoms loader
     atoms_loader = AtomsLoader(args.mof-dir if hasattr(args, "mof-dir") else args.mof_dir)
