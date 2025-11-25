@@ -34,7 +34,9 @@ class SACAgent:
         self.critic = TwinQNetwork(obs_dim, act_dim).to(device)
         self.critic_target = TwinQNetwork(obs_dim, act_dim).to(device)
         self.critic_target.load_state_dict(self.critic.state_dict())
-
+        self.actor = self.actor.float()
+        self.critic = self.critic.float()
+        self.critic_target = self.critic_target.float()
         # 옵티마이저
         self.actor_opt = optim.Adam(self.actor.parameters(), lr=lr)
         self.critic_opt = optim.Adam(self.critic.parameters(), lr=lr)
