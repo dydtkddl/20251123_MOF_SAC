@@ -1,50 +1,56 @@
+# sac/critic.py
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 
-class QNetwork(nn.Module):
-    def __init__(
-        self,
-        obs_dim: int,
-        act_dim: int,
-        hidden_dim: int = 256,
-        hidden_layers: int = 2,
-    ):
+def init_layer_uniform(layer, w=3e-3):
+    layer.weight.data.uniform_(-w, w)
+    layer.bias.data.uniform_(-w, w)
+    return layer
+
+
+class CriticQ(nn.Module):
+    """
+    Per-Atom Q Network
+    Q(obs_i, act_i)
+    """
+
+    def __init__(self, obs_dim: int, act_dim: int = 3, hidden_dim: int = 256):
         super().__init__()
-        in_dim = obs_dim + act_dim
-        layers = []
-        for _ in range(hidden_layers):
-            layers.append(nn.Linear(in_dim, hidden_dim))
-            layers.append(nn.ReLU())
-            in_dim = hidden_dim
-        self.backbone = nn.Sequential(*layers)
-        self.q_head = nn.Linear(hidden_dim, 1)
 
-    def forward(self, obs: torch.Tensor, act: torch.Tensor):
-        if obs.dim() == 1:
-            obs = obs.unsqueeze(0)
-        if act.dim() == 1:
-            act = act.unsqueeze(0)
-        x = torch.cat([obs, act], dim=-1)
-        x = self.backbone(x)
-        q = self.q_head(x)
-        return q
+        self.fc1 = nn.Linear(obs_dim + act_dim, hidden_dim)
+        self.fc2 = nn.Linear(hidden_dim, hidden_dim)
+        self.out = nn.Linear(hidden_dim, 1)
+
+        init_layer_uniform(self.out)
+
+    def forward(self, obs, act):
+        # obs  (batch, obs_dim)
+        # act  (batch, 3)
+        x = torch.cat([obs.float(), act.float()], dim=-1)
+        x = F.relu(self.fc1(x))
+        x = F.relu(self.fc2(x))
+        return self.out(x)
 
 
-class TwinQNetwork(nn.Module):
-    def __init__(
-        self,
-        obs_dim: int,
-        act_dim: int,
-        hidden_dim: int = 256,
-        hidden_layers: int = 2,
-    ):
+class CriticV(nn.Module):
+    """
+    Per-Atom V Network
+    """
+
+    def __init__(self, obs_dim: int, hidden_dim: int = 256):
         super().__init__()
-        self.q1 = QNetwork(obs_dim, act_dim, hidden_dim, hidden_layers)
-        self.q2 = QNetwork(obs_dim, act_dim, hidden_dim, hidden_layers)
 
-    def forward(self, obs: torch.Tensor, act: torch.Tensor):
-        q1 = self.q1(obs, act)
-        q2 = self.q2(obs, act)
-        return q1, q2
+        self.fc1 = nn.Linear(obs_dim, hidden_dim)
+        self.fc2 = nn.Linear(hidden_dim, hidden_dim)
+        self.out = nn.Linear(hidden_dim, 1)
+
+        init_layer_uniform(self.out)
+
+    def forward(self, obs):
+        x = obs.float()
+        x = F.relu(self.fc1(x))
+        x = F.relu(self.fc2(x))
+        return self.out(x)

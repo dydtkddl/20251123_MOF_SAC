@@ -1,156 +1,188 @@
-import logging
-from typing import Dict, Any
+# sac/agent.py
 
+import numpy as np
 import torch
-import torch.nn as nn
+import torch.nn.functional as F
 import torch.optim as optim
 
-from .actor import GaussianPolicy
-from .critic import TwinQNetwork
-
-logger = logging.getLogger(__name__)
+from .actor import Actor
+from .critic import CriticQ, CriticV
 
 
 class SACAgent:
+    """
+    Stable per-atom SAC agent for MACS-MOF RL
+    """
+
     def __init__(
         self,
-        obs_dim: int,
-        act_dim: int,
-        device: torch.device,
-        gamma: float = 0.99,
-        tau: float = 0.005,
-        lr: float = 3e-4,
-        alpha: float = 0.2,
-        automatic_entropy_tuning: bool = True,
-        target_entropy: float = None,
+        obs_dim,
+        replay_buffer,
+        act_dim=3,
+        device="cuda",
+        gamma=0.995,
+        tau=5e-3,
+        batch_size=256,
+        lr=3e-4,
     ):
-        self.device = device
+
+        self.replay = replay_buffer
+        self.batch_size = batch_size
+
+        self.device = torch.device(device if torch.cuda.is_available() else "cpu")
         self.gamma = gamma
         self.tau = tau
-        self.auto_alpha = automatic_entropy_tuning
 
-        # 네트워크
-        self.actor = GaussianPolicy(obs_dim, act_dim).to(device)
-        self.critic = TwinQNetwork(obs_dim, act_dim).to(device)
-        self.critic_target = TwinQNetwork(obs_dim, act_dim).to(device)
-        self.critic_target.load_state_dict(self.critic.state_dict())
-        self.actor = self.actor.float()
-        self.critic = self.critic.float()
-        self.critic_target = self.critic_target.float()
-        # 옵티마이저
+        # ---------------------------
+        # NETWORKS (FP32)
+        # ---------------------------
+        self.actor = Actor(obs_dim, act_dim).to(self.device).float()
+        self.v = CriticV(obs_dim).to(self.device).float()
+        self.v_tgt = CriticV(obs_dim).to(self.device).float()
+        self.q1 = CriticQ(obs_dim, act_dim).to(self.device).float()
+        self.q2 = CriticQ(obs_dim, act_dim).to(self.device).float()
+
+        self.v_tgt.load_state_dict(self.v.state_dict())
+
+        # ---------------------------
+        # OPTIMIZERS
+        # ---------------------------
         self.actor_opt = optim.Adam(self.actor.parameters(), lr=lr)
-        self.critic_opt = optim.Adam(self.critic.parameters(), lr=lr)
+        self.v_opt = optim.Adam(self.v.parameters(), lr=lr)
+        self.q1_opt = optim.Adam(self.q1.parameters(), lr=lr)
+        self.q2_opt = optim.Adam(self.q2.parameters(), lr=lr)
 
-        # entropy temperature
-        if target_entropy is None:
-            # 일반적으로 -|A|
-            target_entropy = -float(act_dim)
-        self.target_entropy = target_entropy
+        # ---------------------------
+        # ENTROPY (TARGET = -1)
+        # ---------------------------
+        self.target_entropy = -1.0
+        self.log_alpha = torch.zeros(1, requires_grad=True, device=self.device)
+        self.alpha_opt = optim.Adam([self.log_alpha], lr=lr)
 
-        if self.auto_alpha:
-            self.log_alpha = torch.zeros(1, requires_grad=True, device=device)
-            self.alpha_opt = optim.Adam([self.log_alpha], lr=lr)
-            self.alpha = self.log_alpha.exp().item()
-        else:
-            self.log_alpha = None
-            self.alpha_opt = None
-            self.alpha = alpha
+        self.total_steps = 0
 
-        logger.info(
-            f"[SACAgent] obs_dim={obs_dim}, act_dim={act_dim}, "
-            f"gamma={gamma}, tau={tau}, auto_alpha={self.auto_alpha}, "
-            f"target_entropy={self.target_entropy}"
-        )
 
-    # --------------------------------------------------------
-    # Action 선택
-    # --------------------------------------------------------
+    @property
+    def alpha(self):
+        return self.log_alpha.exp()
 
-    def select_action(self, obs_np, deterministic: bool = False):
-        self.actor.eval()
+
+    # -------------------------------------------------------------
+    # ACTION SELECTION
+    # -------------------------------------------------------------
+    @torch.no_grad()
+    def act(self, obs):
+        obs = torch.as_tensor(obs, dtype=torch.float32, device=self.device)
+        a, _, _, _ = self.actor(obs)
+        return a.cpu().numpy()
+
+
+    # -------------------------------------------------------------
+    # UPDATE SAC
+    # -------------------------------------------------------------
+    def update(self):
+
+        # ------------------------
+        # FIX: 항상 초기화
+        # ------------------------
+        policy_loss = None
+
+        batch = self.replay.sample(self.batch_size)
+
+        obs  = torch.as_tensor(batch["obs"],  dtype=torch.float32, device=self.device)
+        act  = torch.as_tensor(batch["act"],  dtype=torch.float32, device=self.device)
+        rew  = torch.as_tensor(batch["rew"],  dtype=torch.float32, device=self.device).unsqueeze(1)
+        nobs = torch.as_tensor(batch["nobs"], dtype=torch.float32, device=self.device)
+        done = torch.as_tensor(batch["done"], dtype=torch.float32, device=self.device).unsqueeze(1)
+
+        # ===========================
+        # α update
+        # ===========================
+        new_action, logp, _, _ = self.actor(obs)
+        alpha_loss = -(self.log_alpha * (logp + self.target_entropy).detach()).mean()
+
+        self.alpha_opt.zero_grad()
+        alpha_loss.backward()
+        self.alpha_opt.step()
+
+        # ===========================
+        # Q update
+        # ===========================
         with torch.no_grad():
-            # --- 강제 캐스팅 ---
-            obs = torch.as_tensor(obs_np, device=self.device)
-            obs = obs.float()   # <<<< 여기가 핵심
+            v_next = self.v_tgt(nobs)
+            q_target = rew + (1 - done) * self.gamma * v_next
 
-            actions, _, mean_action = self.actor.sample(obs, deterministic=deterministic)
-            out = mean_action if deterministic else actions
-            actions_np = out.cpu().numpy()
-        self.actor.train()
-        return actions_np
+        q1_pred = self.q1(obs, act)
+        q2_pred = self.q2(obs, act)
 
+        q1_loss = F.mse_loss(q1_pred, q_target)
+        q2_loss = F.mse_loss(q2_pred, q_target)
 
-    # --------------------------------------------------------
-    # 파라미터 업데이트 (one gradient step)
-    # --------------------------------------------------------
+        self.q1_opt.zero_grad()
+        q1_loss.backward()
+        self.q1_opt.step()
 
-    def update_parameters(
-        self, replay_buffer, batch_size: int
-    ) -> Dict[str, Any]:
-        (
-            state_batch,
-            action_batch,
-            reward_batch,
-            next_state_batch,
-            done_batch,
-        ) = replay_buffer.sample(batch_size)
+        self.q2_opt.zero_grad()
+        q2_loss.backward()
+        self.q2_opt.step()
 
-        state_batch = state_batch.to(self.device)
-        action_batch = action_batch.to(self.device)
-        reward_batch = reward_batch.to(self.device)
-        next_state_batch = next_state_batch.to(self.device)
-        done_batch = done_batch.to(self.device)
+        # ===========================
+        # V update
+        # ===========================
+        v_pred = self.v(obs)
 
-        # 1. Critic 업데이트
         with torch.no_grad():
-            next_action, next_log_pi, _ = self.actor.sample(next_state_batch)
-            q1_next, q2_next = self.critic_target(next_state_batch, next_action)
-            q_next = torch.min(q1_next, q2_next) - self.alpha * next_log_pi
-            q_target = reward_batch + (1.0 - done_batch) * self.gamma * q_next
+            q_new = torch.min(
+                self.q1(obs, new_action),
+                self.q2(obs, new_action)
+            )
+        v_tgt = q_new - self.alpha * logp
 
-        q1, q2 = self.critic(state_batch, action_batch)
-        q1_loss = torch.mean((q1 - q_target) ** 2)
-        q2_loss = torch.mean((q2 - q_target) ** 2)
-        critic_loss = q1_loss + q2_loss
+        v_pred = v_pred.float()
+        v_tgt  = v_tgt.float()
 
-        self.critic_opt.zero_grad(set_to_none=True)
-        critic_loss.backward()
-        self.critic_opt.step()
+        v_loss = F.mse_loss(v_pred, v_tgt)
 
-        # 2. Actor 업데이트
-        pi, log_pi, _ = self.actor.sample(state_batch)
-        q1_pi, q2_pi = self.critic(state_batch, pi)
-        q_pi = torch.min(q1_pi, q2_pi)
+        self.v_opt.zero_grad()
+        v_loss.backward()
+        self.v_opt.step()
 
-        actor_loss = (self.alpha * log_pi - q_pi).mean()
 
-        self.actor_opt.zero_grad(set_to_none=True)
-        actor_loss.backward()
-        self.actor_opt.step()
+        # ===========================
+        # Policy update every 2 steps
+        # ===========================
+        if self.total_steps % 2 == 0:
 
-        # 3. Alpha 업데이트
-        alpha_loss_val = 0.0
-        if self.auto_alpha:
-            alpha_loss = -(self.log_alpha * (log_pi + self.target_entropy).detach()).mean()
-            self.alpha_opt.zero_grad(set_to_none=True)
-            alpha_loss.backward()
-            self.alpha_opt.step()
-            self.alpha = self.log_alpha.exp().item()
-            alpha_loss_val = alpha_loss.item()
+            aa, lp, _, _ = self.actor(obs)
 
-        # 4. Target network soft update
-        with torch.no_grad():
-            for p, p_tgt in zip(self.critic.parameters(), self.critic_target.parameters()):
-                p_tgt.data.mul_(1.0 - self.tau)
-                p_tgt.data.add_(self.tau * p.data)
+            q_new2 = torch.min(
+                self.q1(obs, aa),
+                self.q2(obs, aa),
+            )
 
-        info = {
-            "critic_loss": float(critic_loss.item()),
-            "q1_loss": float(q1_loss.item()),
-            "q2_loss": float(q2_loss.item()),
-            "actor_loss": float(actor_loss.item()),
-            "alpha": float(self.alpha),
-            "alpha_loss": float(alpha_loss_val),
+            policy_loss = (self.alpha * lp - q_new2).mean()
+
+            self.actor_opt.zero_grad()
+            policy_loss.backward()
+            self.actor_opt.step()
+
+            self.soft_update()
+
+
+        self.total_steps += 1
+
+        # return losses (optional for logging)
+        return {
+            "policy_loss": float(policy_loss) if policy_loss is not None else None,
+            "q1_loss": float(q1_loss),
+            "q2_loss": float(q2_loss),
+            "v_loss": float(v_loss),
+            "alpha_loss": float(alpha_loss),
         }
 
-        return info
+
+    # -------------------------------------------------------------
+    def soft_update(self):
+        with torch.no_grad():
+            for t, s in zip(self.v_tgt.parameters(), self.v.parameters()):
+                t.data.copy_(self.tau * s.data + (1 - self.tau) * t.data)

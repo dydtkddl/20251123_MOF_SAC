@@ -1,61 +1,73 @@
+# sac/actor.py
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.distributions import Normal
 
 
-class GaussianPolicy(nn.Module):
+def init_layer_uniform(layer: nn.Linear, init_w: float = 3e-3):
+    layer.weight.data.uniform_(-init_w, init_w)
+    layer.bias.data.uniform_(-init_w, init_w)
+    return layer
+
+
+class Actor(nn.Module):
+    """
+    Per-Atom Actor Network
+    obs_dim -> (mu, std) -> action(3,)
+    """
+
     def __init__(
         self,
         obs_dim: int,
-        act_dim: int,
+        act_dim: int = 3,     # ALWAYS 3 (dx,dy,dz)
         hidden_dim: int = 256,
-        hidden_layers: int = 2,
-        log_std_min: float = -20,
-        log_std_max: float = 2,
+        log_std_min: float = -10,
+        log_std_max: float = 1.5,
     ):
         super().__init__()
-        self.obs_dim = obs_dim
-        self.act_dim = act_dim
+
         self.log_std_min = log_std_min
         self.log_std_max = log_std_max
+        self.act_dim = act_dim
 
-        layers = []
-        in_dim = obs_dim
-        for _ in range(hidden_layers):
-            layers.append(nn.Linear(in_dim, hidden_dim))
-            layers.append(nn.ReLU())
-            in_dim = hidden_dim
-        self.backbone = nn.Sequential(*layers)
+        self.fc1 = nn.Linear(obs_dim, hidden_dim)
+        self.fc2 = nn.Linear(hidden_dim, hidden_dim)
 
-        self.mean_linear = nn.Linear(hidden_dim, act_dim)
-        self.log_std_linear = nn.Linear(hidden_dim, act_dim)
+        self.mu_layer = nn.Linear(hidden_dim, act_dim)
+        self.log_std_layer = nn.Linear(hidden_dim, act_dim)
 
-    def forward(self, obs: torch.Tensor):
-        if obs.dim() == 1:
-            obs = obs.unsqueeze(0)
-        x = self.backbone(obs)
-        mean = self.mean_linear(x)
-        log_std = self.log_std_linear(x)
+        init_layer_uniform(self.mu_layer)
+        init_layer_uniform(self.log_std_layer)
+
+    def forward(self, obs):
+        """
+        obs: (batch, obs_dim)
+        return: action(3,), log_prob, mu, std
+        """
+
+        # FP32 강화
+        obs = obs.float()
+
+        x = F.relu(self.fc1(obs))
+        x = F.relu(self.fc2(x))
+
+        mu = self.mu_layer(x)
+
+        log_std = self.log_std_layer(x)
         log_std = torch.clamp(log_std, self.log_std_min, self.log_std_max)
-        return mean, log_std
+        std = torch.exp(log_std)
 
-    def sample(
-        self, obs: torch.Tensor, deterministic: bool = False
-    ):
-        mean, log_std = self.forward(obs)
-        if deterministic:
-            action = torch.tanh(mean)
-            log_prob = None
-            return action, log_prob, action
+        # Gaussian reparameterization
+        dist = Normal(mu, std)
+        z = dist.rsample()
 
-        std = log_std.exp()
-        normal = torch.distributions.Normal(mean, std)
-        z = normal.rsample()
+        # Output action in [-1,1]
         action = torch.tanh(z)
 
-        # Tanh-squashed log_prob
-        log_prob = normal.log_prob(z) - torch.log(1 - action.pow(2) + 1e-6)
-        log_prob = log_prob.sum(dim=-1, keepdim=True)
+        # Tanh correction
+        log_prob = dist.log_prob(z) - torch.log(1 - action.pow(2) + 1e-6)
+        log_prob = log_prob.sum(-1, keepdim=True)
 
-        mean_action = torch.tanh(mean)
-        return action, log_prob, mean_action
+        return action, log_prob, mu, std

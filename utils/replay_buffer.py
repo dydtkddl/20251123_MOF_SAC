@@ -1,97 +1,88 @@
-import logging
-from typing import Tuple
+# utils/replay_buffer.py
 
 import numpy as np
-import torch
-
-logger = logging.getLogger(__name__)
 
 
 class ReplayBuffer:
     """
-    Multi-agent per-atom transition을 flatten해서 저장하는 일반 SAC 버퍼.
-    obs:  (N, obs_dim)
-    act:  (N, act_dim)
-    rew:  scalar (global), 모든 atom에 동일하게 할당
+    Stable MACS-style ReplayBuffer
+    ---------------------------------------------------------
+    Stores *per-atom transitions*:
+        obs_i       : (obs_dim,)
+        act_i       : (3,)          # dx, dy, dz
+        reward_i    : float
+        next_obs_i  : (obs_dim,)
+        done        : bool
+    ---------------------------------------------------------
     """
 
     def __init__(
         self,
         obs_dim: int,
-        act_dim: int,
-        size: int,
-        device: torch.device,
+        max_size: int = 5_000_000,
     ):
-        self.obs_dim = obs_dim
-        self.act_dim = act_dim
-        self.size_max = size
-        self.device = device
+        """
+        act_dim is fixed to 3 for stable MACS-style SAC.
+        """
 
-        self.obs_buf = np.zeros((size, obs_dim), dtype=np.float32)
-        self.next_obs_buf = np.zeros((size, obs_dim), dtype=np.float32)
-        self.acts_buf = np.zeros((size, act_dim), dtype=np.float32)
-        self.rew_buf = np.zeros((size, 1), dtype=np.float32)
-        self.done_buf = np.zeros((size, 1), dtype=np.float32)
+        self.obs_dim = obs_dim
+        self.act_dim = 3                # ALWAYS dx, dy, dz
+        self.max_size = max_size
 
         self.ptr = 0
         self.size = 0
 
-        logger.info(
-            f"[ReplayBuffer] Initialized: max_size={size}, obs_dim={obs_dim}, act_dim={act_dim}"
+        # Buffers
+        self.obs_buf = np.zeros((max_size, obs_dim), dtype=np.float32)
+        self.nobs_buf = np.zeros((max_size, obs_dim), dtype=np.float32)
+
+        self.act_buf = np.zeros((max_size, 3), dtype=np.float32)
+        self.rew_buf = np.zeros(max_size, dtype=np.float32)
+        self.done_buf = np.zeros(max_size, dtype=np.bool_)
+
+
+    # ============================================================
+    # STORE ONE ATOM TRANSITION
+    # ============================================================
+    def store(self, obs_i, act_i, rew_i, next_obs_i, done_i):
+        """
+        Parameters
+        ----------
+        obs_i : np.ndarray (obs_dim,)
+        act_i : np.ndarray (3,)
+        rew_i : float
+        next_obs_i : np.ndarray (obs_dim,)
+        done_i : bool
+        """
+
+        self.obs_buf[self.ptr] = obs_i
+        self.act_buf[self.ptr] = act_i
+        self.rew_buf[self.ptr] = rew_i
+        self.nobs_buf[self.ptr] = next_obs_i
+        self.done_buf[self.ptr] = done_i
+
+        self.ptr = (self.ptr + 1) % self.max_size
+        self.size = min(self.size + 1, self.max_size)
+
+
+    # ============================================================
+    # SAMPLE MINI-BATCH
+    # ============================================================
+    def sample(self, batch_size):
+        """
+        Randomly sample per-atom transitions
+        """
+
+        idxs = np.random.randint(0, self.size, size=batch_size)
+
+        return dict(
+            obs=self.obs_buf[idxs],
+            act=self.act_buf[idxs],
+            rew=self.rew_buf[idxs],
+            nobs=self.nobs_buf[idxs],
+            done=self.done_buf[idxs],
         )
+
 
     def __len__(self):
         return self.size
-
-    def store(
-        self,
-        obs: np.ndarray,
-        act: np.ndarray,
-        rew: float,
-        next_obs: np.ndarray,
-        done: bool,
-    ):
-        idx = self.ptr
-        self.obs_buf[idx] = obs
-        self.acts_buf[idx] = act
-        self.rew_buf[idx] = rew
-        self.next_obs_buf[idx] = next_obs
-        self.done_buf[idx] = float(done)
-
-        self.ptr = (self.ptr + 1) % self.size_max
-        self.size = min(self.size + 1, self.size_max)
-
-    def store_batch(
-        self,
-        obs_batch: np.ndarray,   # (N, obs_dim)
-        act_batch: np.ndarray,   # (N, act_dim)
-        rew: float,
-        next_obs_batch: np.ndarray,  # (N, obs_dim)
-        done: bool,
-    ):
-        N = obs_batch.shape[0]
-        for i in range(N):
-            self.store(
-                obs_batch[i],
-                act_batch[i],
-                rew,
-                next_obs_batch[i],
-                done,
-            )
-
-    def sample(self, batch_size: int) -> Tuple[torch.Tensor, ...]:
-        if self.size == 0:
-            raise RuntimeError("ReplayBuffer is empty")
-
-        batch_size = min(batch_size, self.size)
-        idx = np.random.randint(0, self.size, size=batch_size)
-
-        obs = torch.as_tensor(self.obs_buf[idx], dtype=torch.float32, device=self.device)
-        acts = torch.as_tensor(self.acts_buf[idx], dtype=torch.float32, device=self.device)
-        rews = torch.as_tensor(self.rew_buf[idx], dtype=torch.float32, device=self.device)
-        next_obs = torch.as_tensor(
-            self.next_obs_buf[idx], dtype=torch.float32, device=self.device
-        )
-        done = torch.as_tensor(self.done_buf[idx], dtype=torch.float32, device=self.device)
-
-        return obs, acts, rews, next_obs, done

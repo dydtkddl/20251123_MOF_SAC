@@ -95,6 +95,15 @@ BATCH_SIZE   = 256
 
 CHECKPOINT_INTERVAL = 5
 
+# ★ Replay warm-up: per-atom transition 개수 기준
+WARMUP_TRANSITIONS = 50_000   # 필요하면 1e5, 2e5 등으로 조정
+##############################################
+# TRAIN START
+##############################################
+logger.info(f"[MACS-MOF] Training start (EPOCHS={EPOCHS})")
+logger.info(f"[CONFIG] BATCH_SIZE={BATCH_SIZE}, BUFFER_SIZE={BUFFER_SIZE:,}, "
+            f"WARMUP_TRANSITIONS={WARMUP_TRANSITIONS:,}")
+global_start = time.time()
 
 ##############################################
 # GLOBALS
@@ -221,8 +230,21 @@ for ep in range(EPOCHS):
                 done,
             )
 
-        if len(replay) > agent.batch_size:
-            agent.update()
+        # ------------------------
+        # SAC 업데이트 (Replay warm-up 적용)
+        # ------------------------
+        if len(replay) > max(agent.batch_size, WARMUP_TRANSITIONS):
+            losses = agent.update()
+            # 필요하면 여기서 losses를 logger로 남겨도 됨
+            # logger.info(f"[EP {ep}][STEP {step}] losses={losses}")
+        else:
+            # Warm-up 구간에서 얼마나 쌓였는지 가끔 찍어보기 (선택)
+            if len(replay) % 10_000 == 0:
+                logger.info(
+                    f"[WARMUP] replay={len(replay):,} / {WARMUP_TRANSITIONS:,} "
+                    f"(batch={agent.batch_size})"
+                )
+
 
         ########################
         # LOG & SAVE TRAJECTORY
