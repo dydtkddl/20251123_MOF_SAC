@@ -94,7 +94,7 @@ BUFFER_SIZE  = 5_000_000
 BATCH_SIZE   = 256
 
 CHECKPOINT_INTERVAL = 5
-WARMUP_TRANSITIONS = 500   # 필요하면 1e5, 2e5 등으로 조정
+WARMUP_TRANSITIONS = 50_000   # 필요하면 1e5, 2e5 등으로 조정
 
 ##############################################
 # TRAIN START

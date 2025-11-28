@@ -1,0 +1,365 @@
+2025-11-26 21:03:36,253 - INFO - [EP 221] terminated early at step=608
+2025-11-26 21:03:36,253 - INFO - [EP 221] return=-11.316313
+--
+2025-11-26 21:04:56,830 - INFO - [EP 222] terminated early at step=609
+2025-11-26 21:04:56,830 - INFO - [EP 222] return=-10.606878
+--
+2025-11-26 21:06:06,205 - INFO - [EP 223] terminated early at step=611
+2025-11-26 21:06:06,205 - INFO - [EP 223] return=-10.270845
+--
+2025-11-26 21:07:41,253 - INFO - [EP 224] terminated early at step=612
+2025-11-26 21:07:41,253 - INFO - [EP 224] return=-14.733962
+--
+2025-11-26 21:09:08,324 - INFO - [EP 225] terminated early at step=614
+2025-11-26 21:09:08,324 - INFO - [EP 225] return=-6.911990
+--
+2025-11-26 21:10:40,113 - INFO - [EP 226] terminated early at step=615
+2025-11-26 21:10:40,114 - INFO - [EP 226] return=-6.044345
+--
+2025-11-26 21:12:03,936 - INFO - [EP 227] terminated early at step=616
+2025-11-26 21:12:03,937 - INFO - [EP 227] return=-4.474752
+--
+2025-11-26 21:13:14,966 - INFO - [EP 228] terminated early at step=618
+2025-11-26 21:13:14,967 - INFO - [EP 228] return=-9.287079
+--
+2025-11-26 21:14:31,430 - INFO - [EP 229] terminated early at step=619
+2025-11-26 21:14:31,431 - INFO - [EP 229] return=-16.956974
+--
+2025-11-26 21:15:11,242 - INFO - [EP 230] terminated early at step=368
+2025-11-26 21:15:11,242 - INFO - [EP 230] return=-1.122845
+--
+2025-11-26 21:16:25,407 - INFO - [EP 231] terminated early at step=622
+2025-11-26 21:16:25,407 - INFO - [EP 231] return=-13.072991
+--
+2025-11-26 21:17:27,529 - INFO - [EP 232] terminated early at step=623
+2025-11-26 21:17:27,529 - INFO - [EP 232] return=-17.557004
+--
+2025-11-26 21:19:02,029 - INFO - [EP 233] terminated early at step=625
+2025-11-26 21:19:02,029 - INFO - [EP 233] return=-7.361930
+--
+2025-11-26 21:20:26,302 - INFO - [EP 234] terminated early at step=626
+2025-11-26 21:20:26,302 - INFO - [EP 234] return=-22.900704
+--
+2025-11-26 21:21:53,380 - INFO - [EP 235] terminated early at step=628
+2025-11-26 21:21:53,380 - INFO - [EP 235] return=-5.957498
+--
+2025-11-26 21:23:26,452 - INFO - [EP 236] terminated early at step=629
+2025-11-26 21:23:26,452 - INFO - [EP 236] return=-7.487220
+--
+2025-11-26 21:24:36,304 - INFO - [EP 237] terminated early at step=630
+2025-11-26 21:24:36,304 - INFO - [EP 237] return=-11.433075
+--
+2025-11-26 21:25:59,556 - INFO - [EP 238] terminated early at step=632
+2025-11-26 21:25:59,556 - INFO - [EP 238] return=-7.872616
+--
+2025-11-26 21:27:22,091 - INFO - [EP 239] terminated early at step=633
+2025-11-26 21:27:22,091 - INFO - [EP 239] return=-6.582664
+--
+2025-11-26 21:28:26,086 - INFO - [EP 240] terminated early at step=635
+2025-11-26 21:28:26,086 - INFO - [EP 240] return=-11.419041
+--
+2025-11-26 21:30:04,844 - INFO - [EP 241] terminated early at step=636
+2025-11-26 21:30:04,844 - INFO - [EP 241] return=-11.718972
+--
+2025-11-26 21:31:45,564 - INFO - [EP 242] terminated early at step=637
+2025-11-26 21:31:45,564 - INFO - [EP 242] return=-4.646817
+--
+2025-11-26 21:33:00,277 - INFO - [EP 243] terminated early at step=639
+2025-11-26 21:33:00,277 - INFO - [EP 243] return=-17.937620
+--
+2025-11-26 21:33:46,851 - INFO - [EP 244] terminated early at step=305
+2025-11-26 21:33:46,851 - INFO - [EP 244] return=-0.102786
+--
+2025-11-26 21:35:02,644 - INFO - [EP 245] terminated early at step=642
+2025-11-26 21:35:02,644 - INFO - [EP 245] return=-9.952149
+--
+2025-11-26 21:36:16,640 - INFO - [EP 246] terminated early at step=643
+2025-11-26 21:36:16,640 - INFO - [EP 246] return=-10.207549
+--
+2025-11-26 21:37:18,434 - INFO - [EP 247] terminated early at step=644
+2025-11-26 21:37:18,434 - INFO - [EP 247] return=-23.865740
+--
+2025-11-26 21:38:44,949 - INFO - [EP 248] terminated early at step=646
+2025-11-26 21:38:44,949 - INFO - [EP 248] return=-6.763641
+--
+2025-11-26 21:40:17,146 - INFO - [EP 249] terminated early at step=647
+2025-11-26 21:40:17,146 - INFO - [EP 249] return=-18.061798
+--
+2025-11-26 21:41:43,607 - INFO - [EP 250] terminated early at step=649
+2025-11-26 21:41:43,607 - INFO - [EP 250] return=-10.093686
+--
+2025-11-26 21:42:56,435 - INFO - [EP 251] terminated early at step=650
+2025-11-26 21:42:56,435 - INFO - [EP 251] return=-6.757537
+--
+2025-11-26 21:44:25,465 - INFO - [EP 252] terminated early at step=651
+2025-11-26 21:44:25,466 - INFO - [EP 252] return=-12.360604
+--
+2025-11-26 21:44:54,180 - INFO - [EP 253] terminated early at step=297
+2025-11-26 21:44:54,181 - INFO - [EP 253] return=2.171266
+--
+2025-11-26 21:44:58,671 - INFO - [EP 254] terminated early at step=46
+2025-11-26 21:44:58,672 - INFO - [EP 254] return=12.422835
+--
+2025-11-26 21:46:21,339 - INFO - [EP 255] terminated early at step=656
+2025-11-26 21:46:21,339 - INFO - [EP 255] return=-12.890326
+--
+2025-11-26 21:47:37,657 - INFO - [EP 256] terminated early at step=657
+2025-11-26 21:47:37,657 - INFO - [EP 256] return=-14.753142
+--
+2025-11-26 21:49:01,899 - INFO - [EP 257] terminated early at step=658
+2025-11-26 21:49:01,899 - INFO - [EP 257] return=-11.757916
+--
+2025-11-26 21:50:10,194 - INFO - [EP 258] terminated early at step=660
+2025-11-26 21:50:10,195 - INFO - [EP 258] return=-13.290003
+--
+2025-11-26 21:51:49,099 - INFO - [EP 259] terminated early at step=661
+2025-11-26 21:51:49,099 - INFO - [EP 259] return=-10.840298
+--
+2025-11-26 21:53:34,411 - INFO - [EP 260] terminated early at step=663
+2025-11-26 21:53:34,411 - INFO - [EP 260] return=-17.942132
+--
+2025-11-26 21:54:48,248 - INFO - [EP 261] terminated early at step=664
+2025-11-26 21:54:48,248 - INFO - [EP 261] return=-7.753705
+--
+2025-11-26 21:55:59,252 - INFO - [EP 262] terminated early at step=665
+2025-11-26 21:55:59,253 - INFO - [EP 262] return=-11.666137
+--
+2025-11-26 21:57:17,409 - INFO - [EP 263] terminated early at step=667
+2025-11-26 21:57:17,409 - INFO - [EP 263] return=-13.229541
+--
+2025-11-26 21:58:25,519 - INFO - [EP 264] terminated early at step=668
+2025-11-26 21:58:25,519 - INFO - [EP 264] return=-4.131217
+--
+2025-11-26 21:59:57,396 - INFO - [EP 265] terminated early at step=670
+2025-11-26 21:59:57,396 - INFO - [EP 265] return=-15.471018
+--
+2025-11-26 22:01:52,425 - INFO - [EP 266] terminated early at step=671
+2025-11-26 22:01:52,426 - INFO - [EP 266] return=-16.256280
+--
+2025-11-26 22:03:30,038 - INFO - [EP 267] terminated early at step=672
+2025-11-26 22:03:30,038 - INFO - [EP 267] return=-17.426524
+--
+2025-11-26 22:04:54,995 - INFO - [EP 268] terminated early at step=674
+2025-11-26 22:04:54,995 - INFO - [EP 268] return=-25.080161
+--
+2025-11-26 22:05:00,569 - INFO - [EP 269] terminated early at step=60
+2025-11-26 22:05:00,569 - INFO - [EP 269] return=11.804530
+--
+2025-11-26 22:06:04,559 - INFO - [EP 270] terminated early at step=459
+2025-11-26 22:06:04,559 - INFO - [EP 270] return=-6.371882
+--
+2025-11-26 22:07:04,010 - INFO - [EP 271] terminated early at step=678
+2025-11-26 22:07:04,010 - INFO - [EP 271] return=-14.964186
+--
+2025-11-26 22:08:35,201 - INFO - [EP 272] terminated early at step=679
+2025-11-26 22:08:35,201 - INFO - [EP 272] return=-17.514904
+--
+2025-11-26 22:09:59,639 - INFO - [EP 273] terminated early at step=681
+2025-11-26 22:09:59,639 - INFO - [EP 273] return=-13.857426
+--
+2025-11-26 22:11:29,261 - INFO - [EP 274] terminated early at step=682
+2025-11-26 22:11:29,261 - INFO - [EP 274] return=-11.566880
+--
+2025-11-26 22:13:11,352 - INFO - [EP 275] terminated early at step=684
+2025-11-26 22:13:11,352 - INFO - [EP 275] return=-12.329946
+--
+2025-11-26 22:13:30,267 - INFO - [EP 276] terminated early at step=152
+2025-11-26 22:13:30,267 - INFO - [EP 276] return=5.735183
+--
+2025-11-26 22:13:36,764 - INFO - [EP 277] terminated early at step=49
+2025-11-26 22:13:36,765 - INFO - [EP 277] return=11.128639
+--
+2025-11-26 22:15:27,136 - INFO - [EP 278] terminated early at step=688
+2025-11-26 22:15:27,136 - INFO - [EP 278] return=-18.182743
+--
+2025-11-26 22:16:48,749 - INFO - [EP 279] terminated early at step=689
+2025-11-26 22:16:48,749 - INFO - [EP 279] return=-12.398315
+--
+2025-11-26 22:16:50,112 - INFO - [EP 280] terminated early at step=7
+2025-11-26 22:16:50,112 - INFO - [EP 280] return=6.151009
+--
+2025-11-26 22:17:12,903 - INFO - [EP 281] terminated early at step=139
+2025-11-26 22:17:12,903 - INFO - [EP 281] return=6.588320
+--
+2025-11-26 22:19:02,301 - INFO - [EP 282] terminated early at step=693
+2025-11-26 22:19:02,301 - INFO - [EP 282] return=-4.201438
+--
+2025-11-26 22:20:09,351 - INFO - [EP 283] terminated early at step=695
+2025-11-26 22:20:09,351 - INFO - [EP 283] return=-14.613853
+--
+2025-11-26 22:21:14,994 - INFO - [EP 284] terminated early at step=696
+2025-11-26 22:21:14,994 - INFO - [EP 284] return=-8.526910
+--
+2025-11-26 22:22:26,229 - INFO - [EP 285] terminated early at step=698
+2025-11-26 22:22:26,229 - INFO - [EP 285] return=-13.960827
+--
+2025-11-26 22:22:28,234 - INFO - [EP 286] terminated early at step=17
+2025-11-26 22:22:28,235 - INFO - [EP 286] return=11.228134
+--
+2025-11-26 22:22:40,069 - INFO - [EP 287] terminated early at step=74
+2025-11-26 22:22:40,069 - INFO - [EP 287] return=11.616978
+--
+2025-11-26 22:22:43,590 - INFO - [EP 288] terminated early at step=33
+2025-11-26 22:22:43,591 - INFO - [EP 288] return=10.404175
+--
+2025-11-26 22:24:08,046 - INFO - [EP 289] terminated early at step=703
+2025-11-26 22:24:08,046 - INFO - [EP 289] return=-15.679640
+--
+2025-11-26 22:25:38,712 - INFO - [EP 290] terminated early at step=705
+2025-11-26 22:25:38,712 - INFO - [EP 290] return=-9.195973
+--
+2025-11-26 22:26:09,286 - INFO - [EP 291] terminated early at step=212
+2025-11-26 22:26:09,286 - INFO - [EP 291] return=7.631844
+--
+2025-11-26 22:26:27,710 - INFO - [EP 292] terminated early at step=109
+2025-11-26 22:26:27,710 - INFO - [EP 292] return=7.446028
+--
+2025-11-26 22:27:28,335 - INFO - [EP 293] terminated early at step=377
+2025-11-26 22:27:28,335 - INFO - [EP 293] return=-3.674185
+--
+2025-11-26 22:28:09,212 - INFO - [EP 294] terminated early at step=333
+2025-11-26 22:28:09,212 - INFO - [EP 294] return=1.733857
+--
+2025-11-26 22:28:20,167 - INFO - [EP 295] terminated early at step=80
+2025-11-26 22:28:20,167 - INFO - [EP 295] return=14.937923
+--
+2025-11-26 22:29:47,978 - INFO - [EP 296] terminated early at step=713
+2025-11-26 22:29:47,978 - INFO - [EP 296] return=-9.529373
+--
+2025-11-26 22:29:56,549 - INFO - [EP 297] terminated early at step=67
+2025-11-26 22:29:56,549 - INFO - [EP 297] return=11.957321
+--
+2025-11-26 22:30:31,186 - INFO - [EP 298] terminated early at step=242
+2025-11-26 22:30:31,186 - INFO - [EP 298] return=3.942123
+--
+2025-11-26 22:30:40,034 - INFO - [EP 299] terminated early at step=72
+2025-11-26 22:30:40,034 - INFO - [EP 299] return=11.827975
+--
+2025-11-26 22:31:13,167 - INFO - [EP 300] terminated early at step=273
+2025-11-26 22:31:13,168 - INFO - [EP 300] return=3.623959
+--
+2025-11-26 22:32:39,530 - INFO - [EP 301] terminated early at step=720
+2025-11-26 22:32:39,530 - INFO - [EP 301] return=-24.116564
+--
+2025-11-26 22:32:40,157 - INFO - [EP 302] terminated early at step=1
+2025-11-26 22:32:40,158 - INFO - [EP 302] return=-1.884736
+--
+2025-11-26 22:34:21,037 - INFO - [EP 303] terminated early at step=723
+2025-11-26 22:34:21,037 - INFO - [EP 303] return=-12.490140
+--
+2025-11-26 22:35:21,965 - INFO - [EP 304] terminated early at step=724
+2025-11-26 22:35:21,966 - INFO - [EP 304] return=-15.589936
+--
+2025-11-26 22:35:23,377 - INFO - [EP 305] terminated early at step=11
+2025-11-26 22:35:23,377 - INFO - [EP 305] return=5.779940
+--
+2025-11-26 22:35:59,115 - INFO - [EP 306] terminated early at step=251
+2025-11-26 22:35:59,115 - INFO - [EP 306] return=3.173657
+--
+2025-11-26 22:37:02,909 - INFO - [EP 307] terminated early at step=728
+2025-11-26 22:37:02,909 - INFO - [EP 307] return=-19.942805
+--
+2025-11-26 22:37:09,371 - INFO - [EP 308] terminated early at step=42
+2025-11-26 22:37:09,371 - INFO - [EP 308] return=3.854514
+--
+2025-11-26 22:37:14,155 - INFO - [EP 309] terminated early at step=46
+2025-11-26 22:37:14,155 - INFO - [EP 309] return=8.360485
+--
+2025-11-26 22:37:44,699 - INFO - [EP 310] terminated early at step=295
+2025-11-26 22:37:44,699 - INFO - [EP 310] return=4.339592
+--
+2025-11-26 22:38:45,603 - INFO - [EP 311] terminated early at step=734
+2025-11-26 22:38:45,603 - INFO - [EP 311] return=-2.099823
+--
+2025-11-26 22:39:57,687 - INFO - [EP 312] terminated early at step=735
+2025-11-26 22:39:57,687 - INFO - [EP 312] return=-17.370596
+--
+2025-11-26 22:40:38,166 - INFO - [EP 313] terminated early at step=343
+2025-11-26 22:40:38,166 - INFO - [EP 313] return=7.426207
+--
+2025-11-26 22:40:42,360 - INFO - [EP 314] terminated early at step=28
+2025-11-26 22:40:42,361 - INFO - [EP 314] return=10.209377
+--
+2025-11-26 22:42:25,334 - INFO - [EP 315] terminated early at step=740
+2025-11-26 22:42:25,334 - INFO - [EP 315] return=-6.806337
+--
+2025-11-26 22:42:33,837 - INFO - [EP 316] terminated early at step=68
+2025-11-26 22:42:33,837 - INFO - [EP 316] return=9.458792
+--
+2025-11-26 22:42:39,739 - INFO - [EP 317] terminated early at step=40
+2025-11-26 22:42:39,739 - INFO - [EP 317] return=9.813404
+--
+2025-11-26 22:42:42,292 - INFO - [EP 318] terminated early at step=21
+2025-11-26 22:42:42,292 - INFO - [EP 318] return=11.154745
+--
+2025-11-26 22:42:47,558 - INFO - [EP 319] terminated early at step=34
+2025-11-26 22:42:47,558 - INFO - [EP 319] return=9.193765
+--
+2025-11-26 22:42:49,237 - INFO - [EP 320] terminated early at step=17
+2025-11-26 22:42:49,237 - INFO - [EP 320] return=1.253139
+--
+2025-11-26 22:43:51,087 - INFO - [EP 321] terminated early at step=433
+2025-11-26 22:43:51,088 - INFO - [EP 321] return=-1.320996
+--
+2025-11-26 22:44:05,815 - INFO - [EP 322] terminated early at step=111
+2025-11-26 22:44:05,816 - INFO - [EP 322] return=8.394163
+--
+2025-11-26 22:44:22,551 - INFO - [EP 323] terminated early at step=156
+2025-11-26 22:44:22,551 - INFO - [EP 323] return=3.070766
+--
+2025-11-26 22:44:30,899 - INFO - [EP 324] terminated early at step=71
+2025-11-26 22:44:30,899 - INFO - [EP 324] return=6.262239
+--
+2025-11-26 22:44:34,058 - INFO - [EP 325] terminated early at step=19
+2025-11-26 22:44:34,058 - INFO - [EP 325] return=7.517496
+--
+2025-11-26 22:45:49,891 - INFO - [EP 326] terminated early at step=755
+2025-11-26 22:45:49,892 - INFO - [EP 326] return=-16.095931
+--
+2025-11-26 22:47:40,790 - INFO - [EP 327] terminated early at step=756
+2025-11-26 22:47:40,790 - INFO - [EP 327] return=-19.158983
+--
+2025-11-26 22:48:50,301 - INFO - [EP 328] terminated early at step=758
+2025-11-26 22:48:50,301 - INFO - [EP 328] return=-12.683840
+--
+2025-11-26 22:49:00,984 - INFO - [EP 329] terminated early at step=93
+2025-11-26 22:49:00,984 - INFO - [EP 329] return=8.736059
+--
+2025-11-26 22:49:05,997 - INFO - [EP 330] terminated early at step=33
+2025-11-26 22:49:05,997 - INFO - [EP 330] return=13.411939
+--
+2025-11-26 22:50:20,811 - INFO - [EP 331] terminated early at step=678
+2025-11-26 22:50:20,811 - INFO - [EP 331] return=-22.746079
+--
+2025-11-26 22:50:28,761 - INFO - [EP 332] terminated early at step=50
+2025-11-26 22:50:28,761 - INFO - [EP 332] return=5.360076
+--
+2025-11-26 22:50:56,447 - INFO - [EP 333] terminated early at step=196
+2025-11-26 22:50:56,448 - INFO - [EP 333] return=9.878664
+--
+2025-11-26 22:51:05,096 - INFO - [EP 334] terminated early at step=80
+2025-11-26 22:51:05,097 - INFO - [EP 334] return=18.607682
+--
+2025-11-26 22:52:27,756 - INFO - [EP 335] terminated early at step=768
+2025-11-26 22:52:27,756 - INFO - [EP 335] return=-23.080174
+--
+2025-11-26 22:52:35,446 - INFO - [EP 336] terminated early at step=58
+2025-11-26 22:52:35,446 - INFO - [EP 336] return=7.060049
+--
+2025-11-26 22:54:30,666 - INFO - [EP 337] terminated early at step=770
+2025-11-26 22:54:30,666 - INFO - [EP 337] return=-11.802006
+--
+2025-11-26 22:55:51,516 - INFO - [EP 338] terminated early at step=400
+2025-11-26 22:55:51,516 - INFO - [EP 338] return=3.598115
+--
+2025-11-26 22:55:56,764 - INFO - [EP 339] terminated early at step=29
+2025-11-26 22:55:56,764 - INFO - [EP 339] return=10.345318
+--
+2025-11-26 22:57:08,912 - INFO - [EP 340] terminated early at step=775
+2025-11-26 22:57:08,912 - INFO - [EP 340] return=-15.439043
+--
+2025-11-26 22:57:30,252 - INFO - [EP 341] terminated early at step=142
+2025-11-26 22:57:30,253 - INFO - [EP 341] return=8.479437
+--
+2025-11-26 22:59:10,490 - INFO - [EP 342] terminated early at step=777
+2025-11-26 22:59:10,490 - INFO - [EP 342] return=-9.890268
