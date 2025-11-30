@@ -5,11 +5,16 @@ from tqdm import tqdm
 from ase.io import read
 from ase.data import chemical_symbols
 from mace.calculators import MACECalculator
+import os
+import os
 
+# ============================================
+# ★ 절대적으로 필요한 스레드 제한 (모든 백엔드 포함)
+# ============================================
 
-POOL_DIR = "mofs/train_pool"
-VALID_DIR = "mofs/train_pool_valid"
-INVALID_DIR = "mofs/train_pool_invalid"
+POOL_DIR = "/home/yongsang/20251123_MOF_SAC/mofs/train_pool.hmof"
+VALID_DIR = "mofs/train_pool_valid.hmof"
+INVALID_DIR = "mofs/train_pool_invalid.hmof"
 
 os.makedirs(VALID_DIR, exist_ok=True)
 os.makedirs(INVALID_DIR, exist_ok=True)
