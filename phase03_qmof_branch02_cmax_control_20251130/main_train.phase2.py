@@ -46,7 +46,7 @@ logger.addHandler(log_handler)
 ##############################################
 # CHECKPOINT I/O
 ##############################################
-PHASE1_CKPT = "../phase01_qmof_20251129/checkpoints/ckpt_ep1500_final.pt"  # <- 필요시 경로 수정
+PHASE1_CKPT = "../phase02_qmof_branch02_20251130/checkpoints_phase2/ckpt_ep1500_final.pt"  # <- 필요시 경로 수정
 
 def save_checkpoint(ep, agent, tag="phase2"):
     os.makedirs("checkpoints_phase2", exist_ok=True)
