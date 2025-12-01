@@ -12,9 +12,9 @@ import os
 # ★ 절대적으로 필요한 스레드 제한 (모든 백엔드 포함)
 # ============================================
 
-POOL_DIR = "/home/yongsang/20251123_MOF_SAC/mofs/train_pool.hmof"
-VALID_DIR = "mofs/train_pool_valid.hmof"
-INVALID_DIR = "mofs/train_pool_invalid.hmof"
+POOL_DIR = "/home/yongsang/20251123_MOF_SAC/mofs/train_pool.coremof"
+VALID_DIR = "mofs/train_pool_valid.coremof"
+INVALID_DIR = "mofs/train_pool_invalid.coremof"
 
 os.makedirs(VALID_DIR, exist_ok=True)
 os.makedirs(INVALID_DIR, exist_ok=True)
