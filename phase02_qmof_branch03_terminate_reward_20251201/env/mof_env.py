@@ -1,5 +1,3 @@
-# env/mof_env.py
-
 import numpy as np
 from ase.neighborlist import neighbor_list
 from ase.data import covalent_radii
@@ -24,10 +22,9 @@ class MOFEnv:
         perturb_sigma=0.05,
         max_perturb=0.3,
         # ---------- New: 종료/시간 관련 하이퍼파라미터 ----------
-        terminal_bonus_base=5.0,
-        time_penalty=0.0,
-        fail_penalty = 3.0,
-
+        terminal_bonus_base=10.0,
+        time_penalty=0.025,
+        fail_penalty=15.0,
     ):
         self.atoms_loader = atoms_loader
 
@@ -46,17 +43,28 @@ class MOFEnv:
         self.com_threshold = 0.30
         self.com_lambda = 20.0    # previously 100 × 0.1=10, now stabilized
 
-        # Phase2: perturb 옵션 저장
+        # Phase2: perturb options
         self.random_perturb = random_perturb
         self.perturb_sigma = perturb_sigma
         self.max_perturb = max_perturb
 
-        # New: 종료/시간 관련 하이퍼파라미터 저장
+        # New: termination / time related hyperparameters
         self.terminal_bonus_base = terminal_bonus_base
         self.time_penalty = time_penalty
         self.fail_penalty = fail_penalty
+
         self.feature_dim = None
-        # self.reset()
+
+        # --------------------------------------------------------
+        # New: last-step reward component logging
+        # --------------------------------------------------------
+        self.last_r_f_mean = 0.0          # mean log(force) reward
+        self.last_com_penalty = 0.0       # COM penalty (scalar)
+        self.last_bond_penalty = 0.0      # sum of bond penalties
+        self.last_time_penalty = 0.0      # time_penalty (scalar)
+        self.last_fail_penalty = 0.0      # fail_penalty (scalar)
+        self.last_terminal_bonus = 0.0    # success terminal bonus (scalar)
+        self.last_reward_mean = 0.0       # final reward mean
 
     # ============================================================
     # True Bonds
@@ -167,24 +175,20 @@ class MOFEnv:
     # Phase2: reset perturb
     # ============================================================
     def _apply_random_perturbation(self):
-        """
-        QMOF 구조에 작은 Gaussian 노이즈를 주되,
-        원자별 변위 norm이 max_perturb를 넘지 않게 클리핑.
-        """
+        """Apply small Gaussian noise and clip per-atom displacement."""
         if (not self.random_perturb) or self.perturb_sigma <= 0.0:
             return
 
         pos = self.atoms.positions.copy()
-        N = len(pos)
 
-        # 1) 기본 Gaussian noise
+        # 1) basic Gaussian noise
         delta = np.random.normal(
             loc=0.0,
             scale=self.perturb_sigma,
             size=pos.shape,
         )
 
-        # 2) 원자당 max_perturb 클리핑
+        # 2) per-atom max_perturb clipping
         if self.max_perturb is not None:
             norms = np.linalg.norm(delta, axis=1, keepdims=True)  # (N,1)
             norms_safe = np.maximum(norms, 1e-12)
@@ -203,7 +207,7 @@ class MOFEnv:
     # RESET
     # ============================================================
     def reset(self):
-        # 1) 깨끗한 QMOF 구조 로드
+        # 1) clean QMOF structure
         self.atoms = self.atoms_loader()
         self.N = len(self.atoms)
 
@@ -212,11 +216,11 @@ class MOFEnv:
             np.float32
         )
 
-        # 2) 원래 구조 기준으로 bond & bond_d0 계산
+        # 2) bonds & bond_d0 from reference structure
         self.bond_pairs, self.bond_d0 = self._detect_true_bonds(self.atoms)
         print(f"[INIT] Detected true bonds = {len(self.bond_pairs)}")
 
-        # 3) adjacency & 역할 플래그 등 계산
+        # 3) adjacency & role flags
         self.adj = {i: [] for i in range(self.N)}
         for a, b in self.bond_pairs:
             self.adj[a].append(b)
@@ -283,10 +287,10 @@ class MOFEnv:
             if self.is_mu3O[b]:
                 self.bond_types[a][5] += 1
 
-        # 4) Phase2: 여기서 좌표에 작은 perturb 적용
+        # 4) Phase2: apply perturbation here
         self._apply_random_perturbation()
 
-        # 5) perturb된 구조 기준으로 force 초기화
+        # 5) initialize forces based on perturbed structure
         self.forces = self.atoms.get_forces().astype(np.float32)
         self.prev_forces = np.zeros_like(self.forces)
         self.prev_disp = np.zeros_like(self.forces)
@@ -294,8 +298,17 @@ class MOFEnv:
         self.step_count = 0
         self.COM_prev = self.atoms.positions.mean(axis=0).astype(np.float32)
 
-        # feature_dim 계산은 force 초기화 후
+        # feature_dim after force init
         self.feature_dim = len(self._make_feature(0))
+
+        # reset reward components
+        self.last_r_f_mean = 0.0
+        self.last_com_penalty = 0.0
+        self.last_bond_penalty = 0.0
+        self.last_time_penalty = 0.0
+        self.last_fail_penalty = 0.0
+        self.last_terminal_bonus = 0.0
+        self.last_reward_mean = 0.0
 
         return self._obs()
 
@@ -418,6 +431,31 @@ class MOFEnv:
         return np.array(obs_list, float)
 
     # ============================================================
+    # Internal: reward component logger
+    # ============================================================
+    def _set_last_reward_components(
+        self,
+        r_f_mean,
+        com_penalty,
+        bond_penalty,
+        time_penalty,
+        fail_penalty,
+        terminal_bonus,
+        reward,
+    ):
+        """
+        reward: per-atom reward vector (shape: (N,))
+        others: scalar components
+        """
+        self.last_r_f_mean = float(r_f_mean)
+        self.last_com_penalty = float(com_penalty)
+        self.last_bond_penalty = float(bond_penalty)
+        self.last_time_penalty = float(time_penalty)
+        self.last_fail_penalty = float(fail_penalty)
+        self.last_terminal_bonus = float(terminal_bonus)
+        self.last_reward_mean = float(np.mean(reward))
+
+    # ============================================================
     # STEP  (Stabilized RL version)
     # ============================================================
     def step(self, action):
@@ -444,6 +482,7 @@ class MOFEnv:
         # -----------------------------
         r_f = 10.0 * (np.log(old_norm + 1e-6) - np.log(new_norm + 1e-6))
         reward = r_f.copy()  # shape (N,)
+        r_f_mean = float(np.mean(r_f))
 
         # -----------------------------
         # 3) COM penalty (stabilized)
@@ -451,18 +490,34 @@ class MOFEnv:
         COM_new = self.atoms.positions.mean(axis=0)
         delta_COM = np.linalg.norm(COM_new - self.COM_prev)
 
-        reward -= self.com_lambda * delta_COM
+        com_pen = self.com_lambda * delta_COM
+        reward -= com_pen
         self.COM_prev = COM_new.copy()
 
+        # COM 폭주 조기 종료 케이스
         if delta_COM > self.com_threshold:
-            # COM 폭주로 조기 종료되는 경우에도 time_penalty 적용
+            time_pen = 0.0
             if self.time_penalty > 0.0:
+                time_pen = self.time_penalty
                 reward -= self.time_penalty
+
+            # bond_penalty = 0, fail_penalty = 0, terminal_bonus = 0
+            self._set_last_reward_components(
+                r_f_mean,
+                com_penalty=com_pen,
+                bond_penalty=0.0,
+                time_penalty=time_pen,
+                fail_penalty=0.0,
+                terminal_bonus=0.0,
+                reward=reward,
+            )
             return self._obs(), reward, True
 
         # -----------------------------
         # 4) Bond penalty (×1, capped at 3)
         # -----------------------------
+        bond_pen_sum = 0.0
+
         for idx, (a, b) in enumerate(self.bond_pairs):
 
             rel = self._rel_vec(a, b)
@@ -476,12 +531,25 @@ class MOFEnv:
             penalty = 1.0 * self.k_bond * np.sqrt(stretch**2 + compress**2)
             penalty = min(penalty, 3.0)
 
+            bond_pen_sum += penalty
             reward -= penalty
 
+            # bond 완전 붕괴/비정상 시 조기 종료
             if ratio > 6.0 or ratio < 0.25:
-                # bond 완전 붕괴/비정상 시에도 time_penalty 한 번 적용
+                time_pen = 0.0
                 if self.time_penalty > 0.0:
+                    time_pen = self.time_penalty
                     reward -= self.time_penalty
+
+                self._set_last_reward_components(
+                    r_f_mean,
+                    com_penalty=com_pen,
+                    bond_penalty=bond_pen_sum,
+                    time_penalty=time_pen,
+                    fail_penalty=0.0,
+                    terminal_bonus=0.0,
+                    reward=reward,
+                )
                 return self._obs(), reward, True
 
         # -----------------------------
@@ -489,6 +557,8 @@ class MOFEnv:
         # -----------------------------
         done = False
         success = False
+        fail_pen = 0.0
+        bonus = 0.0
 
         if np.mean(new_norm) < self.fmax_threshold:
             done = True
@@ -496,13 +566,16 @@ class MOFEnv:
 
         if self.step_count >= self.max_steps:
             done = True
-            if not success:
-                reward -= self.fail_penalty     # ★ 실패 패널티 추가
+            if not success and self.fail_penalty > 0.0:
+                fail_pen = self.fail_penalty
+                reward -= self.fail_penalty
 
         # -----------------------------
         # 6) Time penalty (living cost)
         # -----------------------------
+        time_pen = 0.0
         if self.time_penalty > 0.0:
+            time_pen = self.time_penalty
             reward -= self.time_penalty
 
         # -----------------------------
@@ -514,6 +587,19 @@ class MOFEnv:
             frac = max(frac, 0.0)
             bonus = self.terminal_bonus_base * frac
             reward += bonus
+
+        # -----------------------------
+        # (New) reward composition 기록
+        # -----------------------------
+        self._set_last_reward_components(
+            r_f_mean,
+            com_penalty=com_pen,
+            bond_penalty=bond_pen_sum,
+            time_penalty=time_pen,
+            fail_penalty=fail_pen,
+            terminal_bonus=bonus,
+            reward=reward,
+        )
 
         # -----------------------------
         # Update memory

@@ -8,11 +8,12 @@
 # - New ReplayBuffer + Warm-up
 # - Reset-time random perturb (sigma 0.02~0.08 Å, max 0.3 Å)
 # - cmax curriculum: 0.03 → 0.40 over episodes
+# - Reward component logging (force / COM / bond / time / fail / bonus)
 ##############################################
 
 import os
 import time
-import numpy as np
+import numpy as np  # ⬅️ 여기서 np가 아니라 numpy 쓸 거면 `import numpy as np` 로 바꿔줘
 import logging
 from logging.handlers import RotatingFileHandler
 from tqdm import tqdm
@@ -46,7 +47,7 @@ logger.addHandler(log_handler)
 ##############################################
 # CHECKPOINT I/O
 ##############################################
-PHASE1_CKPT = "../phase01_qmof_20251129/checkpoints/ckpt_ep1500_final.pt"#  "checkpoint#PHASE1_CKPT = "../phase03_qmof_branch02_cmax_control_20251130/checkpoints_phase2/ckpt_ep1500_final.pt"  # <- 필요시 경로 수정
+PHASE1_CKPT = "../phase01_qmof_20251129/checkpoints/ckpt_ep1500_final.pt"
 
 
 def save_checkpoint(ep, agent, tag="phase2"):
@@ -131,7 +132,7 @@ MAX_PERTURB = 0.30  # Å (헤더 주석대로 max 0.3 Å 적용)
 
 # ---------- cmax 커리큘럼 설정 ----------
 CMAX_MIN = 0.03         # 초기 EP에서 사용할 최소 cmax
-CMAX_MAX = 0.09         # 후반 EP에서 사용할 최대 cmax
+CMAX_MAX = 0.2         # 후반 EP에서 사용할 최대 cmax
 CMAX_SCH_START_EP = 0       # cmax 증가 시작 EP
 CMAX_SCH_END_EP = 1000      # cmax 증가 종료 EP
 
@@ -248,7 +249,8 @@ for ep in range(EPOCHS):
         max_perturb=MAX_PERTURB,
         # New: 종료/시간 관련 하이퍼파라미터
         terminal_bonus_base=10.0,   # 성공 시 남은 step 비율에 비례한 보너스
-        time_penalty=0.003,        # 매 step -0.001 정도 (튜닝 대상)
+        time_penalty=0.05,         # 매 step -0.003 (튜닝 대상)
+        fail_penalty=15.0,           # max_steps 도달 실패 패널티
     )
 
     obs = env.reset()
@@ -354,16 +356,27 @@ for ep in range(EPOCHS):
 
         f_norm = np.linalg.norm(env.forces, axis=1)
 
+        # Reward component breakdown from env
+        rf_mean = env.last_r_f_mean
+        com_pen = env.last_com_penalty
+        bond_pen = env.last_bond_penalty
+        t_pen = env.last_time_penalty
+        f_pen = env.last_fail_penalty
+        t_bonus = env.last_terminal_bonus
+        r_mean = env.last_reward_mean
+
         logger.info(
             f"[EP {ep}][STEP {step}] "
             f"N={N_atom} | "
-            f"Favg={np.mean(f_norm):.6f} Fmax={np.max(f_norm):.6f} "
-            f"rew_mean={float(np.mean(next_reward)):.6f} | "
+            f"Favg={np.mean(f_norm)} Fmax={np.max(f_norm)} | "
+            f"r_mean={r_mean:.6f} (rf={rf_mean:.6f}, "
+            f"COM=-{com_pen:.6f}, bond=-{bond_pen:.6f}, "
+            f"time=-{t_pen:.6f}, fail=-{f_pen:.6f}, bonus=+{t_bonus:.6f}) | "
             f"replay={len(replay):,} | "
             f"alpha={float(agent.alpha):.5f}"
         )
 
-        ep_ret += float(np.mean(next_reward))
+        ep_ret += float(r_mean)
         obs = next_obs
 
         if done:
