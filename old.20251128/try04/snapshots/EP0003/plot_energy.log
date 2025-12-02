@@ -1,0 +1,3 @@
+2025-12-02 10:06:21,407 - INFO - Loading energy file: energies.txt
+2025-12-02 10:06:21,427 - INFO - Loaded 1000 steps.
+2025-12-02 10:06:21,980 - INFO - Saved plot to energy_convergence_twin.png
