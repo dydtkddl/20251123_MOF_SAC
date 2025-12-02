@@ -1,0 +1,164 @@
+# configs/train_phase2.yaml
+# ------------------------------------------------------------------
+# MACS-MOF Phase2 (4D gate + disp) 설정 파일
+# - train_mof_phase2_gate4d.py + utils/config_utils.py 기준으로 정렬
+# - dataclass(TrainConfig, EnvConfig, SACConfig, ReplayConfig, BCConfig,
+#   ModesConfig, BFGSConfig)의 필드와 1:1 매칭됨
+# ------------------------------------------------------------------
+
+train:
+  # -----------------------------
+  # Global training schedule
+  # -----------------------------
+  epochs: 3000          # 총 episode 수 (EPOCHS)
+  base_steps: 300       # 초기 max_steps (BASE_STEPS)
+  final_steps: 600      # 후반 max_steps (FINAL_STEPS)
+  horizon_sch: 500      # BASE→FINAL 선형 증가 EP 수 (HORIZON_SCH)
+
+  # -----------------------------
+  # Force / convergence
+  # -----------------------------
+  fmax_thresh: 0.05     # env.fmax_threshold (FMAX_THRESH)
+
+  # -----------------------------
+  # Replay / batch
+  # -----------------------------
+  buffer_size: 5000000  # 전체 버퍼 타겟 사이즈 (BUFFER_SIZE)
+  batch_size: 256       # SAC batch size (BATCH_SIZE)
+  warmup_transitions: 20000  # WARMUP_TRANSITIONS
+
+  # -----------------------------
+  # Checkpoint
+  # -----------------------------
+  checkpoint_interval: 10  # 몇 EP마다 ckpt 저장할지
+
+  # -----------------------------
+  # CIF / surrogate model (QMOF + MACE)
+  # -----------------------------
+  pool_dir: "../mofs/train_pool_valid"   # POOL_DIR
+  mace_model_paths:
+    - "../mofs_v2.model"                 # calc = MACECalculator(model_paths=...)
+  mace_head: "pbe_d3"
+  device: "cuda"
+
+# ------------------------------------------------------------------
+# EnvConfig: MOFEnv 하이퍼파라미터
+# ------------------------------------------------------------------
+env:
+  # -----------------------------
+  # Neighbor / k-hop 관련
+  # -----------------------------
+  k_neighbors: 12
+
+  # -----------------------------
+  # cmax curriculum (EP별 step scale 상한)
+  # -----------------------------
+  cmax_min: 0.03             # 초기 EP cmax (CMAX_MIN)
+  cmax_max: 0.40             # 후반 EP cmax (CMAX_MAX)
+  cmax_sch_start_ep: 1500    # cmax 증가 시작 EP (CMAX_SCH_START_EP)
+  cmax_sch_end_ep: 2000      # cmax 증가 끝 EP (CMAX_SCH_END_EP)
+
+  # -----------------------------
+  # Phase2 perturb 옵션 (reset-time)
+  # train_mof_phase2_gate4d.py 의 SIGMA_MIN / SIGMA_MAX / MAX_PERTURB와 정합
+  # -----------------------------
+  random_perturb: true
+  sigma_min: 0.02        # Å, EP=0 근처
+  sigma_max: 0.08        # Å, EP >= epochs/2 근처
+  max_perturb: 0.30      # Å, per-atom clip (MAX_PERTURB)
+
+  # -----------------------------
+  # Termination / time
+  # -----------------------------
+  terminal_bonus_base: 10.0  # 성공 시 (남은 step 비율) * terminal_bonus_base
+  time_penalty: 0.05         # 매 step -time_penalty
+  fail_penalty: 15.0         # max_steps 도달 실패 시 -fail_penalty
+
+  # -----------------------------
+  # 1A: Force norm increase penalty (옵션)
+  # -----------------------------
+  use_force_increase_penalty: false
+  lambda_force_up: 2.0
+
+  # -----------------------------
+  # 1B: F·disp 방향 penalty (env/action_postproc.compute_fd_direction_penalty)
+  # -----------------------------
+  use_fd_direction_penalty: false
+  lambda_fd_penalty: 1.0
+
+  # -----------------------------
+  # 3A: Bond-subspace projection
+  # -----------------------------
+  use_bond_projection: false
+
+  # -----------------------------
+  # 3B: Local frame (radial / tangent) scaling
+  # -----------------------------
+  use_local_frame: false
+  radial_scale: 1.0
+  tangent_scale: 1.0
+
+  # -----------------------------
+  # 4A/4B: Mode 기반 액션/후처리 (env/modes.py와 연동)
+  #  - EnvConfig에는 flag만 두고,
+  #  - 실제 mode type/num_modes/dir은 아래 modes 블록에서 관리
+  # -----------------------------
+  use_mode_basis: false
+
+# ------------------------------------------------------------------
+# SACConfig: per-atom SAC 하이퍼파라미터
+# ------------------------------------------------------------------
+sac:
+  lr: 0.0003          # actor / critic / alpha 공통 learning rate
+  gamma: 0.995        # discount
+  tau: 0.005          # Polyak factor
+  target_entropy: -1.0  # 현재 코드 기준 유지
+
+  # -----------------------------
+  # RL 중 BC loss term (On-policy BC+RL)
+  # -----------------------------
+  use_bc_loss: false      # True면 SAC 업데이트 시 BC term 추가
+  bc_lambda: 0.1          # BC loss weight
+  bc_dataset_path: null   # 예: "data/bc_expert.npz"
+  bc_batch_ratio: 0.2     # 전체 업데이트 중 BC 섞는 비율 (0~1)
+
+# ------------------------------------------------------------------
+# ReplayConfig: ReplayBuffer 설정
+# ------------------------------------------------------------------
+replay:
+  max_size: 5000000       # ReplayBuffer.max_size (train.buffer_size와 맞추는 걸 추천)
+  log_interval: 500000    # size가 여기 배수일 때마다 로그
+  use_expert_replay_seed: false  # True면 expert_replay로 buffer seed
+  expert_replay_path: null       # 예: "data/expert_replay_seed.npz"
+
+# ------------------------------------------------------------------
+# BCConfig: 사전 BC pretrain (optional)
+# ------------------------------------------------------------------
+bc:
+  use_pretrain: false           # True면 actor를 expert dataset으로 먼저 학습
+  dataset_path: null           # 예: "data/bc_expert.npz"
+  epochs: 50
+  batch_size: 512
+  output_path: "checkpoints_phase2/actor_bc.pt"
+
+# ------------------------------------------------------------------
+# ModesConfig: Graph/Fourier 기반 mode basis 설정
+#  - graph Laplacian eigenmode 등
+#  - 실제 사용 시 env.use_mode_basis + USE_MODE_SMOOTHING 와이어링 필요
+# ------------------------------------------------------------------
+modes:
+  use_mode_basis: false        # 모드 기반 표현/후처리 사용 여부
+  type: "graph_eig"            # "graph_eig" 또는 "fourier" 등
+  num_modes: 16                # constant mode 제외 후 사용할 모드 개수
+  dir: "data/modes"            # precomputed *_modes.npy 저장/로드 디렉토리
+
+# ------------------------------------------------------------------
+# BFGSConfig: expert trajectory (BFGS) 생성용 설정
+#  - gen_bfgs_trajectories.py 등에서 사용
+# ------------------------------------------------------------------
+bfgs:
+  pool_dir: "../mofs/train_pool_valid"  # QMOF 풀
+  output_dir: "data/bfgs_traj"          # EXP_*.npz / traj 저장 위치
+  num_structures: 100                   # 샘플링할 구조 개수
+  max_steps: 200                        # BFGS 최대 step 수
+  fmax: 0.05                            # 수렴 기준
